@@ -1,249 +1,168 @@
 ##########################################
 # Python script file equivalent of GRU 
-# notebook
+# notebook - Refactored with SHAP Integration
 #
-#
+# This file has been refactored to improve efficiency, readability,
+# and includes SHAP explanations for model interpretability.
 ###########################################
-
 
 import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
 import seaborn as sns
+import time
+import math
+from datetime import datetime
+from typing import Optional, List, Tuple, Union
 
-from torch.utils.data.sampler import BatchSampler, RandomSampler
-from torch.utils.data import DataLoader
-
+# PyTorch imports
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
 from torch.autograd import Variable
-
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data.sampler import BatchSampler, RandomSampler
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
+# Scikit-learn imports
 from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, MinMaxScaler, FunctionTransformer
-#, SplineTransformer
 from sklearn.pipeline import Pipeline
-
-
 from sklearn.metrics import mean_squared_error
-
 from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted, check_consistent_length
-
-#from sklearn.ensemble import HistGradientBoostingRegressor
-
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, PredefinedSplit
-# from skopt import BayesSearchCV
-import math
 
-import torch  
-from torch.utils.tensorboard import SummaryWriter  
+# Local imports
+from config import get_default_config, ExperimentConfig
+from neural_networks import get_model_class, BasicLogGRU
+from shap_utils import ShapExplainer, log_shap_explanations, create_background_dataset  
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Configuration Setup
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+# Load configuration
+config = get_default_config()
 
-cutoff = 40       # 40 is the (hard-coded) cut-off as set out previously
-cutoff1=32
-nn_iter = 2001     # 100 for experimentation, 500 appears to give models that have fully converged or are close to convergence. 
-
-
-cv_runs = 24      # Testing only: 4, proper runs of the models: 24
-glm_iter = 500    # 500 epochs for gradient descent fitting of GLMs
-nn_cv_iter = 100  # Lower for CV to save running time
-mdn_iter = 1000   # Appears to need 1000 to give models that have fully converged or are close to convergence. 
-
-#Specify is development periods with no transactions to be filled in or not
-#filename="data_origframework.csv"
-#filename="data_origframework_nofills.csv"
-filename="data_origframework_nofills_nosttl.csv"
-
-#Labelling
-from datetime import datetime
-now=datetime.now()
-
+# Set pandas display options
 pd.options.display.float_format = '{:,.2f}'.format
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# Data
+# Data Loading and Processing
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+def load_and_process_data(config: ExperimentConfig) -> pd.DataFrame:
+    """
+    Load and process the claims data.
+    
+    Args:
+        config: Experiment configuration
+        
+    Returns:
+        Processed DataFrame
+    """
+    # Read in data
+    dat = pd.read_csv(
+        config.data.data_dir + config.data.filename
+    )
+    
+    # Data engineering - adds extra columns to dataset
+    dat["train_ind_time"] = (dat.payment_period <= config.data.cutoff1)
+    dat["test_ind_time"] = (dat.payment_period <= config.data.cutoff)
+    dat["train_settled"] = (dat.settle_period <= config.data.cutoff)
+    dat["settled_flag"] = (dat.settle_period <= config.data.cutoff1)
+    
+    dat['is_settled'] = dat['is_settled'].astype(int)
+    dat["is_settled_future"] = (dat.is_settled)
+    dat.loc[dat['payment_period'] > config.data.cutoff, 'is_settled_future'] = -1
+    dat["future_flag"] = ~dat["train_ind_time"]
+    
+    dat["future_paid_cum"] = (dat.log1_paid_cumulative)
+    dat.loc[dat['payment_period'] > config.data.cutoff, 'future_paid_cum'] = 12.3
+    
+    dat["L250k"] = 0
+    dat.loc[dat['claim_size'] > 250000, 'L250k'] = 1
+    
+    # Create current development mappings
+    currentdev = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['development_period'].to_dict()
+    dat['curr_dev'] = dat['claim_no'].map(currentdev)
+    dat["curr_dev"].fillna(0, inplace=True)
+    
+    currentpaid = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['log1_paid_cumulative'].to_dict()
+    dat['curr_paid'] = dat['claim_no'].map(currentpaid)
+    dat["curr_paid"].fillna(0, inplace=True)
+    
+    currentpmtno = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['pmt_no'].to_dict()
+    dat['curr_pmtno'] = dat['claim_no'].map(currentpmtno)
+    dat["curr_pmtno"].fillna(0, inplace=True)
+    
+    return dat
 
-#Read in dat and create new train/test splits
-#dirname_in="https://raw.githubusercontent.com/MLRWP/mlrwp-book/main/Research/"
-dirname="/home/nigel/git/MLR_working_party/01_data/"
-#filename="data_origframework.csv"
-#filename="data_origframework_nofills.csv"
-filename="data_origframework_nofills_nosttl.csv"
-
-dat = pd.read_csv(
-    dirname + filename
-)
-
-dat
-
-
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# data engineering
-# adds 10 extra cols to dataset
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-dat["train_ind_time"] = (dat.payment_period <= cutoff1)
-dat["test_ind_time"] = (dat.payment_period <= cutoff)
-dat["train_settled"] = (dat.settle_period <= cutoff)
-dat["settled_flag"] = (dat.settle_period <= cutoff1)
-
-dat['is_settled'] = dat['is_settled'].astype(int)
-dat["is_settled_future"] = (dat.is_settled)
-dat.loc[dat['payment_period'] > cutoff, 'is_settled_future'] = -1
-dat["future_flag"]= ~dat["train_ind_time"]
-
-dat["future_paid_cum"] = (dat.log1_paid_cumulative)
-dat.loc[dat['payment_period'] > cutoff, 'future_paid_cum'] = 12.3
-
-dat["L250k"]=0
-dat.loc[dat['claim_size'] > 250000, 'L250k'] = 1
-
-currentdev = dat[dat['payment_period'] == cutoff].set_index('claim_no')['development_period'].to_dict()
-dat['curr_dev'] = dat['claim_no'].map(currentdev)
-dat["curr_dev"].fillna(0, inplace=True)
-
-currentpaid = dat[dat['payment_period'] == cutoff].set_index('claim_no')['log1_paid_cumulative'].to_dict()
-dat['curr_paid'] = dat['claim_no'].map(currentpaid)
-dat["curr_paid"].fillna(0, inplace=True)
-
-currentpmtno = dat[dat['payment_period'] == cutoff].set_index('claim_no')['pmt_no'].to_dict()
-dat['curr_pmtno'] = dat['claim_no'].map(currentpmtno)
-dat["curr_pmtno"].fillna(0, inplace=True)
+# Load data
+dat = load_and_process_data(config)
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# create train and test datasets
+# Dataset Creation
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-# Features to include per transaction
-features = [
-    "occurrence_time", 
-#    "initial_case_estimate",
-    "notidel", 
-    "development_period", 
-    "pmt_no",
-    "log1_paid_cumulative",
-#    "settled_flag",
-#    "is_settled",
-#    "future_paid_cum",
-#    "future_flag"
-#    "train_ind_time" #past flag
-#    "log1_incurred_cumulative",
-#    "max_paid_dev_factor",
-#    "min_paid_dev_factor",
-#    "max_incurred_dev_factor",
-#    "min_incurred_dev_factor",
-]
+def create_train_test_datasets(dat: pd.DataFrame, config: ExperimentConfig) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    """
+    Create training and test datasets from processed data.
+    
+    Args:
+        dat: Processed DataFrame
+        config: Experiment configuration
+        
+    Returns:
+        Tuple of (trainx, y_train, testx, y_test)
+    """
+    features = config.data.features
+    youtput = config.data.output_field
+    
+    # Training data: settled claims within training time period
+    trainx = dat.loc[
+        (dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1), 
+        features + ["claim_no"]
+    ]
+    y_train = dat.loc[
+        (dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)
+    ].groupby('claim_no')[youtput].last()
+    
+    # Test data: unsettled claims not in training set
+    testx = dat.loc[
+        (dat.test_ind_time == 1) & (dat.train_ind == 0) & (dat.train_settled == 0),
+        features + ["claim_no"]
+    ]
+    y_test = dat.loc[
+        (dat.train_ind_time == 1) & (dat.train_ind == 0) & (dat.train_settled == 0)
+    ].groupby('claim_no')[youtput].last()
+    
+    return trainx, y_train, testx, y_test
 
-data_cols=features + ["claim_no"]
+# Create datasets
+trainx, y_train, testx, y_test = create_train_test_datasets(dat, config)
 
-youtput="claim_size"
+# Extract configuration values for backwards compatibility
+features = config.data.features
+data_cols = config.data.data_cols
+youtput = config.data.output_field
 
-
-#X_train = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.is_settled == 1), list_of_features])
-#y_train = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.is_settled == 1), ["claim_size"]])
-
-#Rectangular
-#trainx = (dat.loc[(dat.train_ind == 1), features + ["claim_no"]])
-#y_train = (
-#    dat.loc[(dat.train_ind == 1)]
-#    .groupby('claim_no')[youtput].last()
-#)
-
-#testx = (dat.loc[(dat.train_ind == 0), features + ["claim_no"]])
-#y_test = (
-#    dat.loc[dat.train_ind == 0]
-#    .groupby('claim_no')[youtput].last()  
-#)
-
-#S3
-trainx = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1), features + ["claim_no"]])
-y_train = (
-    dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)]
-    .groupby('claim_no')[youtput].last()
-)
-
-#train: include outstanding claims too
-#trainx = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1), features + ["claim_no"]])
-#y_train = (
-#    dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1)]
-#    .groupby('claim_no')[youtput].last()
-#)
-
-testx = (dat.loc[(dat.test_ind_time == 1) & (dat.train_ind == 0) & (dat.train_settled == 0),  features + ["claim_no"]])
-y_test = (
-    dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 0) & (dat.train_settled == 0)]
-    .groupby('claim_no')[youtput].last()
-)
-
-#include settled claims too
-#testx = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 0),  features + ["claim_no"]])
-#y_test = (
-#    dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 0) & (dat.train_settled == 0)]
-#    .groupby('claim_no')[youtput].last()
-#)
-
-#S0
-#X_train = (dat.loc[(dat.train_ind == 1) & (dat.train_settled == 1), list_of_features])
-#y_train = (dat.loc[(dat.train_ind == 1) & (dat.train_settled == 1), ["claim_size"]])
-
-#X_test = (dat.loc[(dat.train_ind == 0) & (dat.train_settled == 1), list_of_features])
-#y_test = (dat.loc[(dat.train_ind == 0) & (dat.train_settled == 1), [youtput]])
-
-#S6
-#X_test = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 0), list_of_features])
-#y_test = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 0), ["payment_size_cumulative"]])
-
-#S5
-#X_test = (dat.loc[(dat.train_ind == 0) & (dat.train_settled == 0), list_of_features])
-#y_test = (dat.loc[(dat.train_ind == 0) & (dat.train_settled == 0), [youtput]])
-
-#S4
-#X_train = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1), list_of_features])
-#y_train = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1), ["payment_size_cumulative"]])
-
-
-#S2
-#X_train = (dat.loc[(dat.train_ind_time == 1) & (dat.is_settled == 1), list_of_features])
-#y_train = (dat.loc[(dat.train_ind_time == 1) & (dat.is_settled == 1), ["claim_size"]])
-
-#X_test = (dat.loc[(dat.train_ind_time == 0) & (dat.is_settled == 0), list_of_features])
-#y_test = (dat.loc[(dat.train_ind_time == 0) & (dat.is_settled == 0), ["claim_size"]])
-
-#X = (dat.loc[:, list_of_features])
-#y = (dat.loc[:, youtput])
-
-#Output files used to compare train and test subsets in Tableau
-#triangletrain = (X_train
-#    .groupby(["occurrence_time", "development_period"], as_index=False)
-#    .agg({"log1_paid_cumulative": "sum"})
-#    .sort_values(by=["occurrence_time", "development_period"])
-#)
-#trainsum=triangletrain.pivot(index = "occurrence_time", columns = "development_period", values = "log1_paid_cumulative")
-
-#trainsum.to_csv("/Users/sarahmacdonnell/Documents/Work/MLR_WP/Gregtraintri.csv")
-
-dat.loc[:, features + [youtput, "claim_no"]]
-
-
-nclms=trainx['claim_no'].nunique()
-print(isinstance(trainx, pd.DataFrame), nclms)
+# Print dataset info
+nclms = trainx['claim_no'].nunique()
+print(f"Training dataset - DataFrame: {isinstance(trainx, pd.DataFrame)}, Claims: {nclms}")
 nfeatures = len(features)
-print(nfeatures)  
+print(f"Number of features: {nfeatures}")  
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # classes to support modelling
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+# Initialize TensorBoard writer
 writer = SummaryWriter()  
 
 class TabularNetRegressor(BaseEstimator, RegressorMixin):
@@ -268,18 +187,94 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         clip_value=None,
         n_gaussians=3,
         verbose=1,                
-        device="cpu", #if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"),  # Use GPU if available, leave mps off until more stable
+        device="cpu", 
         init_bias=None,
+        enable_shap=True,  # Enable SHAP explanations
+        shap_log_frequency=500,  # Log SHAP every N epochs
         **kwargs
     ):
         """ Tabular Neural Network Regressor (for Claims Reserving)
 
         This trains a neural network with specified loss, Log Link and l1 LASSO penalties
-        using Pytorch. It has early stopping.
+        using Pytorch. It has early stopping and SHAP explainability.
 
         Args:
             module: pytorch nn.Module. Should have n_input and n_output as parameters and
                 if l1_penalty, init_weight, or init_bias are used, a final layer 
+                called "linear".
+
+            criterion: pytorch loss function. Consider nn.PoissonNLLLoss for log link.
+
+            max_iter (int): Maximum number of epochs before training stops.
+
+            max_lr (float): Min / Max learning rate - we will use one_cycle_lr
+
+            keep_best_model (bool): If true, keep and use the model weights with the best loss rather 
+                than the final weights.
+
+            batch_function (None or fn): If not None, used to get a batch from X and y
+
+            rebatch_every_iter (int): redo batches every
+
+            l1_penalty (float): l1 penalty factor. If not zero, is applied to 
+                parameters in l1_applies_params.
+
+            l1_applies_params (list): Parameters to apply l1 penalty to.
+
+            weight_decay (float): L2 penalty to apply to all parameters
+
+            batch_norm (bool): Whether to use batch normalization
+
+            interactions (bool): Whether to use interaction terms
+
+            dropout (float): Dropout probability
+
+            clip_value (None or float): If not None, clip gradients to this value
+
+            verbose (int): Verbosity level
+
+            device (str): Device to use ('cpu', 'cuda', etc.)
+
+            init_bias (None or float): If not None, initialize output layer bias to this value
+
+            enable_shap (bool): Whether to enable SHAP explanations during training
+
+            shap_log_frequency (int): Frequency of SHAP logging (every N epochs)
+        """
+        
+        self.module = module
+        self.criterion = criterion
+        self.max_iter = max_iter
+        self.max_lr = max_lr
+        self.keep_best_model = keep_best_model
+        self.batch_function = batch_function
+        self.rebatch_every_iter = rebatch_every_iter
+        self.n_input = n_input
+        self.n_hidden = n_hidden
+        self.n_output = n_output
+        self.l1_penalty = l1_penalty
+        self.l1_applies_params = l1_applies_params
+        self.weight_decay = weight_decay
+        self.batch_norm = batch_norm
+        self.interactions = interactions
+        self.dropout = dropout
+        self.clip_value = clip_value
+        self.n_gaussians = n_gaussians
+        self.verbose = verbose
+        self.device = device
+        self.init_bias = init_bias
+        self.enable_shap = enable_shap
+        self.shap_log_frequency = shap_log_frequency
+        self.kwargs = kwargs
+        
+        # Target device for tensors
+        self.target_device = torch.device(device)
+        
+        # Training state
+        self.module_ = None
+        self.best_model = None
+        self.shap_explainer = None
+        self.print_loss_every_iter = kwargs.get('print_loss_every_iter', 100) 
                 called "linear".
 
             criterion: pytorch loss function. Consider nn.PoissonNLLLoss for log link.
