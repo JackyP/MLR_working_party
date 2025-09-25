@@ -73,7 +73,7 @@ pd.options.display.float_format = '{:,.2f}'.format
 
 #Read in dat and create new train/test splits
 #dirname_in="https://raw.githubusercontent.com/MLRWP/mlrwp-book/main/Research/"
-dirname="/mnt/nfs_clientshare/home/f20122/git/99_MLR_NN/01_data"
+dirname="/home/nigel/git/MLR_working_party/01_data/"
 #filename="data_origframework.csv"
 #filename="data_origframework_nofills.csv"
 filename="data_origframework_nofills_nosttl.csv"
