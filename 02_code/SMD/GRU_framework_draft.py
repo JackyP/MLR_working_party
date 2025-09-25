@@ -274,68 +274,11 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         self.module_ = None
         self.best_model = None
         self.shap_explainer = None
-        self.print_loss_every_iter = kwargs.get('print_loss_every_iter', 100) 
-                called "linear".
-
-            criterion: pytorch loss function. Consider nn.PoissonNLLLoss for log link.
-
-            max_iter (int): Maximum number of epochs before training stops. 
-                Previously this used a high value for triangles since the record count is so small.
-                For larger regression problems, a lower number of iterations may be sufficient.
-
-            max_lr (float): Min / Max learning rate - we will use one_cycle_lr
-
-            keep_best_model (bool): If true, keep and use the model weights with the best loss rather 
-                than the final weights.
-
-            batch_function (None or fn): If not None, used to get a batch from X and y
-
-            rebatch_every_iter (int): redo batches every
-
-            l1_penalty (float): l1 penalty factor. If not zero, is applied to 
-                the layers in the Module with names matching l1_applies_params.
-
-                (we use l1_penalty because lambda is a reserved word in Python 
-                for anonymous functions)
-
-            weight_decay (float): weight decay - analogous to l2 penalty factor
-                Applied to all weights
-
-            clip_value (None or float): clip gradient norms at a particular value
-            
-            n_hidden (int), batch_norm(bool), dropout (float), interactions(bool), n_gaussians(int): 
-                Passed to module. Hidden layer size, batch normalisation, dropout percentages, and interactions flag.
-
-            init_bias (coerces to torch.Tensor): set init_bias, passed to module. If none, default to np.log(y.mean()).values.astype(np.float32)
-
-            verbose (int): 0 means don't print. 1 means do print.
-        """
-        self.module = module
-        self.criterion = criterion
-        self.keep_best_model = keep_best_model
-        self.l1_penalty = l1_penalty
-        self.l1_applies_params = l1_applies_params
-        self.weight_decay = weight_decay
-        self.max_iter = max_iter
-        self.n_hidden = n_hidden
-        self.batch_norm = batch_norm
-        self.batch_function = batch_function
-        self.rebatch_every_iter = rebatch_every_iter
-        self.interactions = interactions
-        self.dropout = dropout
-        self.n_gaussians = n_gaussians
-        self.device = device
-        self.target_device = torch.device(device)    
-        self.max_lr = max_lr
-        self.init_bias = init_bias
-        self.print_loss_every_iter = max(1, int(max_iter / 10))
-        self.verbose = verbose
-        self.clip_value = clip_value
-        self.kwargs = kwargs
+        self.print_loss_every_iter = kwargs.get('print_loss_every_iter', max(1, int(max_iter / 10)))
 
         
     def fix_array(self, y):
-        "Need to be picky about array formats"
+        """Need to be picky about array formats"""
         if isinstance(y, pd.DataFrame) or isinstance(y, pd.Series):
             y = y.values
         if y.ndim == 1:
@@ -383,15 +326,21 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         X_tensor = X.to(self.target_device)
         y_tensor = torch.from_numpy(self.fix_array(y)).to(self.target_device)
 
-        # Optimizer - the generically useful AdamW. Other options like SGD
-        # are also possible.
-        
-#        optimizer = torch.optim.SGD(
-#            params=self.module_.parameters(),
-#            lr=0.000000000001,
-#            weight_decay=self.weight_decay
-#        )
-        
+        # Initialize SHAP explainer if enabled
+        if self.enable_shap and self.shap_explainer is None:
+            try:
+                # Create background dataset for SHAP
+                background_data = create_background_dataset(X_tensor, n_samples=100)
+                feature_names = [f"Feature_{i}" for i in range(X_tensor.shape[-1])]
+                self.shap_explainer = ShapExplainer(self.module_, background_data, feature_names)
+                if self.verbose > 0:
+                    print("SHAP explainer initialized successfully")
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"Warning: Failed to initialize SHAP explainer: {e}")
+                self.enable_shap = False
+
+        # Optimizer - the generically useful AdamW. Other options like SGD are also possible.
         optimizer = torch.optim.AdamW(
             params=self.module_.parameters(),
             lr=self.max_lr / 10,
@@ -425,45 +374,38 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             self.module_.train()
             y_pred = self.module_(X_tensor_batch)  #  Apply current model
 
-#Tensorboard
-            expected=y_pred.detach().numpy()
-            ln_expected=np.log(expected)
-            ln_actual=np.log(y_tensor_batch)
-            diff=y_tensor_batch - expected
-#            writer.add_figure('AvsE', plt.scatter(y_tensor_batch, expected), global_step=epoch)
-#            writer.add_embedding(y_tensor_batch)
+            # Tensorboard logging
+            expected = y_pred.detach().cpu().numpy()
+            ln_expected = np.log(expected + 1e-8)  # Add small epsilon to avoid log(0)
+            ln_actual = np.log(y_tensor_batch.detach().cpu().numpy() + 1e-8)
+            diff = y_tensor_batch.detach().cpu().numpy() - expected
             
             loss = loss_fn(y_pred, y_tensor_batch) #  What is the loss on it?
-# Error 1: ((E-A)/A)^2
-#            loss = torch.mean(torch.square((y_pred - y_tensor_batch)/y_tensor_batch))
-# Error 1.1: ((E-A)/A)^2)*1000000
-#            loss = torch.mean(torch.square((y_pred - y_tensor_batch)/y_tensor_batch))*1000000
-# Error 2: (A-E)^2/E
-#            loss = torch.mean(torch.square((y_pred - y_tensor_batch))/y_pred)
-# Error 3: ((A/E)-1)^2
-#            loss = torch.mean(torch.square((y_pred / y_tensor_batch) - 1))
-# Error 4: (ln(A/F))^2
-#            loss = torch.mean(torch.square(torch.log(y_pred - y_tensor_batch)))
 
-# ((E-A)/E)^2
-#            loss = torch.mean(torch.square((y_pred - y_tensor_batch)/y_pred))
-
-    
-#Tensorboard
+            # Tensorboard logging - basic metrics
             writer.add_scalar("Loss", loss, epoch)
-#            writer.add_scalar("BestLoss", best_loss, epoch)
-#            print("BestLoss: ", best_loss, " Train Loss: ", loss.data.tolist(), " Epoch: ", epoch)
-
-#Learning rate
+            
+            # Learning rate logging
             current_lr = scheduler.get_last_lr()[0]  # Assuming one parameter group
             writer.add_scalar('Learning Rate', current_lr, epoch)
 
-# Weights and biases
+            # Weights and biases logging
             for name, param in self.module_.named_parameters():       
                 writer.add_histogram(name, param, epoch)
                 if param.grad is not None:
                     writer.add_histogram(f'{name}.grad', param.grad, epoch)
-#                print(f"Name: {name}, Value: {param}, Gradient: {param.grad}")
+
+            # SHAP explanations logging (less frequent to avoid performance issues)
+            if (self.enable_shap and self.shap_explainer is not None and 
+                epoch % self.shap_log_frequency == 0 and epoch > 0):
+                try:
+                    log_shap_explanations(
+                        writer, self.shap_explainer, X_tensor_batch, epoch, 
+                        prefix="Training_SHAP", max_samples=50
+                    )
+                except Exception as e:
+                    if self.verbose > 0:
+                        print(f"Warning: SHAP logging failed at epoch {epoch}: {e}")
                 
             if self.l1_penalty > 0.0:        #  Lasso penalty
                 loss += self.l1_penalty * sum(
@@ -824,68 +766,144 @@ model_NN = Pipeline(
         ("keep", ColumnKeeper(data_cols)),   
         ('zero_to_one', preprocessor),       # Important! Standardize deep learning inputs.
         ('3Dtensor', Make3D(features)),
-        ("model", TabularNetRegressor(BasicLogGRU, n_input=nfeatures, n_hidden=32, n_output=1, max_iter=nn_iter))
+        ("model", TabularNetRegressor(
+            BasicLogGRU, 
+            n_input=nfeatures, 
+            n_hidden=config.model.n_hidden, 
+            n_output=config.model.n_output, 
+            max_iter=config.training.nn_iter,
+            enable_shap=config.training.enable_shap,
+            shap_log_frequency=config.training.shap_log_frequency
+        ))
     ]
 )
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
-# Fit NN
+# Model Training
 #
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-import time
-# Start time
-start_time = time.time()
+def train_model(model, trainx, y_train, config: ExperimentConfig):
+    """
+    Train the neural network model with timing.
+    
+    Args:
+        model: The model pipeline to train
+        trainx: Training features
+        y_train: Training targets
+        config: Experiment configuration
+        
+    Returns:
+        Trained model and elapsed time
+    """
+    print("Starting model training...")
+    start_time = time.time()
+    
+    model.fit(trainx, y_train)
+    
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Training completed. Execution time: {elapsed_time:.6f} seconds")
+    
+    return model, elapsed_time
 
-model_NN.fit(
-    trainx,
-    y_train
-)
-
-# End time
-end_time = time.time()
-# Calculate elapsed time
-elapsed_time = end_time - start_time
-print(f"Execution time: {elapsed_time:.6f} seconds")
+# Train the model
+trained_model, training_time = train_model(model_NN, trainx, y_train, config)
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
-# Tensorboard outputs
+# Enhanced Tensorboard Outputs with SHAP Explanations
 #
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-youtput="claim_size"
+def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig):
+    """
+    Generate comprehensive tensorboard outputs including SHAP explanations.
+    
+    Args:
+        model: Trained model pipeline
+        dat: Original dataset
+        config: Experiment configuration
+    """
+    print("Generating enhanced tensorboard outputs...")
+    youtput = config.data.output_field
+    
+    # Training set analysis
+    train = dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)]
+    train_features = train[config.data.features + ["claim_no"]]
+    
+    # Generate predictions
+    y_pred = model.predict(train)
+    
+    # Merge predictions back into dataset
+    claim_nos = train["claim_no"].drop_duplicates()
+    pred_df = pd.DataFrame({
+        "claim_no": claim_nos.values,
+        "pred_claims": y_pred
+    })
+    
+    if "pred_claims" in train.columns:
+        train = train.drop(columns=["pred_claims"])
+    
+    train_pred = train.merge(pred_df, on="claim_no", how="left")
+    
+    # Feature engineering for analysis
+    train_pred["log_pred_claims"] = train_pred["pred_claims"].apply(lambda x: np.log(x+1))
+    train_pred["log_actual"] = train_pred[youtput].apply(lambda x: np.log(x+1))
+    train_pred["rpt_delay"] = np.ceil(train_pred.notidel).astype(int)
+    train_pred["diff"] = train_pred[youtput] - train_pred["pred_claims"]
+    train_pred["diffp"] = (train_pred[youtput] - train_pred["pred_claims"]) / train_pred[youtput]
+    
+    # Create quantile groups
+    train_pred["pred_claims_decile"] = pd.qcut(train_pred["pred_claims"], 10, labels=False, duplicates='drop')
+    train_pred["pred_claims_20cile"] = pd.qcut(train_pred["pred_claims"], 20, labels=False, duplicates='drop')
+    train_pred["log_pred_claims_decile"] = pd.qcut(train_pred["log_pred_claims"], 10, labels=False, duplicates='drop')
+    train_pred["log_pred_claims_20cile"] = pd.qcut(train_pred["log_pred_claims"], 20, labels=False, duplicates='drop')
+    
+    # Generate SHAP explanations for final model if enabled
+    if config.training.enable_shap:
+        try:
+            print("Generating SHAP explanations for trained model...")
+            
+            # Get the underlying neural network model
+            nn_model = model.named_steps['model'].module_
+            
+            # Transform features through the pipeline (excluding the final model step)  
+            pipeline_steps = model.steps[:-1]  # All steps except the model
+            feature_pipeline = Pipeline(pipeline_steps)
+            X_transformed = feature_pipeline.transform(train_features)
+            
+            # Convert to tensor
+            X_tensor = torch.tensor(X_transformed, dtype=torch.float32)
+            
+            # Create SHAP explainer
+            background_data = create_background_dataset(X_tensor, n_samples=100)
+            feature_names = config.data.features
+            shap_explainer = ShapExplainer(nn_model, background_data, feature_names)
+            
+            # Generate SHAP explanations for a sample of training data
+            sample_size = min(200, len(X_tensor))
+            sample_indices = np.random.choice(len(X_tensor), sample_size, replace=False)
+            X_sample = X_tensor[sample_indices]
+            
+            # Log SHAP explanations to tensorboard
+            log_shap_explanations(
+                writer, shap_explainer, X_sample, epoch=9999,  # Use high epoch number for final analysis
+                prefix="Final_Model_SHAP", max_samples=sample_size
+            )
+            
+            print("SHAP explanations logged to tensorboard successfully!")
+            
+        except Exception as e:
+            print(f"Warning: Failed to generate SHAP explanations: {e}")
+    
+    return train_pred
 
-train = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)])
-
-y_pred=model_NN.predict(train)
-
-#merge y_pred back into dat for each claim
-claim_nos = train["claim_no"].drop_duplicates()
-pred_df = pd.DataFrame({
-    "claim_no": claim_nos.values,
-    "pred_claims": y_pred
-})
-
-if "pred_claims" in train.columns:
-    train = train.drop(columns=["pred_claims"])
-
-train_pred = train.merge(pred_df, on="claim_no", how="left")
-
-train_pred["log_pred_claims"]=train_pred["pred_claims"].apply(lambda x: np.log(x+1))
-train_pred["log_actual"]=train_pred[youtput].apply(lambda x: np.log(x+1))
-
-train_pred["rpt_delay"]=np.ceil(train_pred.notidel).astype(int)
-
-train_pred["diff"]=train_pred[youtput]-train_pred["pred_claims"]
-train_pred["diffp"]=(train_pred[youtput]-train_pred["pred_claims"])/train_pred[youtput]
-
-train_pred["pred_claims_decile"] = pd.qcut(train_pred["pred_claims"], 10, labels=False, duplicates='drop')
-train_pred["pred_claims_20cile"] = pd.qcut(train_pred["pred_claims"], 20, labels=False, duplicates='drop')
-train_pred["log_pred_claims_decile"] = pd.qcut(train_pred["log_pred_claims"], 10, labels=False, duplicates='drop')
+# Generate enhanced outputs
+train_pred = generate_enhanced_tensorboard_outputs(trained_model, dat, config)
 train_pred["log_pred_claims_20cile"] = pd.qcut(train_pred["log_pred_claims"], 20, labels=False, duplicates='drop')
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
