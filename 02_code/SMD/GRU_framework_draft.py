@@ -9,34 +9,29 @@
 import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
-import seaborn as sns
 import time
-import math
-from datetime import datetime
-from typing import Optional, List, Tuple, Union
+from typing import Tuple
 
 # PyTorch imports
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-from torch.autograd import Variable
+
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data.sampler import BatchSampler, RandomSampler
-from torch.utils.data import DataLoader
+
+
 from torch.utils.tensorboard import SummaryWriter
 
 # Scikit-learn imports
-from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, MinMaxScaler, FunctionTransformer
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_squared_error
+
 from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
-from sklearn.utils.validation import check_X_y, check_array, check_is_fitted, check_consistent_length
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, PredefinedSplit
+from sklearn.utils.validation import check_is_fitted, check_consistent_length
 
 # Local imports
 from config import get_default_config, ExperimentConfig
-from neural_networks import get_model_class, BasicLogGRU
+from neural_networks import BasicLogGRU
 from shap_utils import ShapExplainer, log_shap_explanations, create_background_dataset  
 
 
@@ -49,6 +44,9 @@ config = get_default_config()
 
 # Set pandas display options
 pd.options.display.float_format = '{:,.2f}'.format
+
+SEED = 42 
+rng = np.random.default_rng(SEED) 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Data Loading and Processing
@@ -89,15 +87,18 @@ def load_and_process_data(config: ExperimentConfig) -> pd.DataFrame:
     # Create current development mappings
     currentdev = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['development_period'].to_dict()
     dat['curr_dev'] = dat['claim_no'].map(currentdev)
-    dat["curr_dev"].fillna(0, inplace=True)
+    #dat["curr_dev"].fillna(0, inplace=True)
+    dat["curr_dev"] = dat["curr_dev"].fillna(0)
     
     currentpaid = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['log1_paid_cumulative'].to_dict()
     dat['curr_paid'] = dat['claim_no'].map(currentpaid)
-    dat["curr_paid"].fillna(0, inplace=True)
+    #dat["curr_paid"].fillna(0, inplace=True)
+    dat["curr_paid"] = dat["curr_paid"].fillna(0)
     
     currentpmtno = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['pmt_no'].to_dict()
     dat['curr_pmtno'] = dat['claim_no'].map(currentpmtno)
-    dat["curr_pmtno"].fillna(0, inplace=True)
+    #dat["curr_pmtno"].fillna(0, inplace=True)
+    dat["curr_pmtno"] = dat["curr_pmtno"].fillna(0)
     
     return dat
 
@@ -480,7 +481,7 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
                 print(f"refreshing batch on epoch {epoch}")
                 X_tensor_batch, y_tensor_batch = self.batch_function(X_tensor, y_tensor)
         
-            if (epoch==nn_iter-1):
+            if (epoch==self.max_iter-1):
                 for name, param in self.module_.named_parameters():    
                     # Convert parameter tensor to numpy array and flatten it
                     param_np = param.detach().numpy().flatten()
@@ -584,181 +585,6 @@ preprocessor = ColumnTransformer(
     )
 
 preprocessor.set_output(transform="pandas")
-
-
-class BasicLogGRU(nn.Module):
-    def __init__(
-        self,
-        n_input,
-        n_hidden,
-        n_output,
-        batch_norm,
-        dropout,
-        init_bias,
-        **kwargs
-    ):
-        super(BasicLogGRU, self).__init__()
-
-        self.n_hidden = n_hidden
-        self.batch_norm_enabled = batch_norm
-        
-        self.gru = nn.GRU(n_input, n_hidden, batch_first=True)
-
-        if self.batch_norm_enabled:
-            self.bn = nn.BatchNorm1d(n_hidden)
-            
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.fc = nn.Linear(n_hidden, n_output)
-
-        if isinstance(init_bias, float) or isinstance(init_bias, int):
-            self.fc.bias.data.fill_(init_bias)
-
-    def forward(self, x):
-        batch_size = x.size(0)
-
-        # GRU only needs one hidden state (h0), no cell state
-        h0 = torch.zeros(1, batch_size, self.n_hidden).to(x.device)
-
-        out, _ = self.gru(x, h0)
-
-        out = self.dropout(out[:, -1, :])  # Use the output from the last time step
-        out = self.fc(out)
-
-        return torch.exp(out)
-
-
-class BasicLogLSTM(nn.Module):
-    def __init__(
-        self, 
-        n_input, 
-        n_hidden, 
-        n_output,
-        init_bias,
-        batch_norm=False,
-        dropout=0.0,
-        **kwargs
-    ):
-        super(BasicLogLSTM, self).__init__()
-        
-        self.n_hidden = n_hidden
-        self.lstm = nn.LSTM(n_input, n_hidden, batch_first=True)
-
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-        self.fc = nn.Linear(n_hidden, n_output)
-#        self.init_bias = init_bias
-        if isinstance(init_bias, float) or isinstance(init_bias, int):
-            self.fc.bias.data.fill_(init_bias)
-
-    def forward(self, x):
-        batch_size = x.size(0)
-
-        # h0 and c0 are the hidden and cell states
-        h0 = torch.zeros(1, batch_size, self.n_hidden).to(x.device)
-        c0 = torch.zeros(1, batch_size, self.n_hidden).to(x.device)
-
-        out, _ = self.lstm(x, (h0, c0))  # LSTM returns (output, (hn, cn))
-
-        out = self.dropout(out[:, -1, :])  # Use last time step's output
-        out = self.fc(out)
-
-        return torch.exp(out)
-
-
-
-class BasicLogRNN(nn.Module):
-    def __init__(
-        self, 
-        n_input, 
-        n_hidden, 
-        n_output,
-        batch_norm,
-        dropout,
-        init_bias,
-    ):
-        super(BasicLogRNN, self).__init__()
-
-        self.n_hidden = n_hidden
-# the input data tensor has a shape of eg (batch size=100, 40, input_size=10), indicating 100 sequences/claims, 
-#each of length 40, with 10 features per time step
-
-        self.rnn = nn.RNN(n_input, n_hidden, batch_first=True) #The batch_first=True argument in nn.RNN indicates
-#that the input tensors are in the shape of (batch_size, sequence_length, input_size
-
-        self.fc = nn.Linear(n_hidden, n_output) #fully connected layer; mas to 20D hidden layer to a 1D output
-
-    def forward(self, x):
-        h0 = torch.zeros(1, x.size(0), self.n_hidden).to(x.device) #initialisation
-        out, _ = self.rnn(x, h0)
-        out = self.fc(out[:, -1, :]) 
-        return torch.exp(out)
-
-#n_input = 10 #number of features
-#n_hidden = 20
-#n_output = 1
-
-
-
-class LogLinkForwardNet(nn.Module):
-    # Define the parameters in __init__
-    def __init__(
-        self, 
-        n_hidden,                                          # hidden layer size
-        batch_norm,                                        # whether to do batch norm (boolean) 
-        dropout,                                           # dropout percentage,
-        init_bias,                                     # init mean value to speed up convergence        
-        n_input=8,                                         # number of inputs
-        n_output=1,                                        # number of outputs
-        
-    ): 
-
-        super(LogLinkForwardNet, self).__init__()
-
-        self.hidden = torch.nn.Linear(n_input, n_hidden)   # Hidden layer
-        self.hidden2 = torch.nn.Linear(n_hidden, n_hidden)  # New hidden layer
-#        self.hidden3 = torch.nn.Linear(n_hidden, n_hidden)  # Third hidden layer
-        
-        self.batch_norm = batch_norm
-        if batch_norm:
-            self.batchn = torch.nn.BatchNorm1d(n_hidden)   # Batchnorm layer
-        self.dropout = nn.Dropout(dropout)
-
-        self.linear = torch.nn.Linear(n_hidden, n_output)  # Linear coefficients
-
-        nn.init.zeros_(self.linear.weight)                 # Initialise to zero
-        # nn.init.constant_(self.linear.bias, init_bias)        
-        self.linear.bias.data = torch.tensor(init_bias)
-
-    # The forward function defines how you get y from X.
-    def forward(self, x):
-        
-        # First hidden layer
-        h = F.relu(self.hidden(x))
-#Not using batchnorm here otherwise would need to update these
-        if self.batch_norm:
-            h = self.batchn(h)
-        h = self.dropout(h)
-
-        # New second hidden layer
-        h2 = F.relu(self.hidden2(h))
-        if self.batch_norm:
-            h2 = self.batchn2(h2)
-        h2 = self.dropout(h2)
-
-        # Third hidden layer
-#        h3 = F.relu(self.hidden3(h2))
-#        if self.batch_norm:
-#            h3 = self.batchn3(h3)
-#        h3 = self.dropout(h3)
-
-#1 Layer:            
-        return torch.exp(self.linear(h2))                   # log(Y) = XB -> Y = exp(XB)        
-                
-#3 Layers:                
-#        return torch.exp(self.linear(h2))                   # log(Y) = XB -> Y = exp(XB)
-
-
-nfeatures
 
 
 model_NN = Pipeline(
@@ -886,7 +712,8 @@ def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig):
             
             # Generate SHAP explanations for a sample of training data
             sample_size = min(200, len(X_tensor))
-            sample_indices = np.random.choice(len(X_tensor), sample_size, replace=False)
+            #sample_indices = np.random.choice(len(X_tensor), sample_size, replace=False)
+            sample_indices = rng.choice(len(X_tensor), sample_size, replace=False)
             X_sample = X_tensor[sample_indices]
             
             # Log SHAP explanations to tensorboard
