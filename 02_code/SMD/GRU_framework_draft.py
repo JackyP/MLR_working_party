@@ -1,249 +1,169 @@
 ##########################################
 # Python script file equivalent of GRU 
-# notebook
+# notebook - Refactored with SHAP Integration
 #
-#
+# This file has been refactored to improve efficiency, readability,
+# and includes SHAP explanations for model interpretability.
 ###########################################
-
 
 import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
-import seaborn as sns
+import time
+from typing import Tuple
 
-from torch.utils.data.sampler import BatchSampler, RandomSampler
-from torch.utils.data import DataLoader
-
+# PyTorch imports
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-
-from torch.autograd import Variable
 
 from torch.nn.utils.rnn import pad_sequence
 
-from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, MinMaxScaler, FunctionTransformer
-#, SplineTransformer
+
+from torch.utils.tensorboard import SummaryWriter
+
+# Scikit-learn imports
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.pipeline import Pipeline
 
-
-from sklearn.metrics import mean_squared_error
-
 from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
-from sklearn.utils.validation import check_X_y, check_array, check_is_fitted, check_consistent_length
+from sklearn.utils.validation import check_is_fitted, check_consistent_length
 
-#from sklearn.ensemble import HistGradientBoostingRegressor
-
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, PredefinedSplit
-# from skopt import BayesSearchCV
-import math
-
-import torch  
-from torch.utils.tensorboard import SummaryWriter  
+# Local imports
+from config import get_default_config, ExperimentConfig
+from neural_networks import BasicLogGRU
+from shap_utils import ShapExplainer, log_shap_explanations, create_background_dataset  
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Configuration Setup
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+# Load configuration
+config = get_default_config()
 
-cutoff = 40       # 40 is the (hard-coded) cut-off as set out previously
-cutoff1=32
-nn_iter = 2001     # 100 for experimentation, 500 appears to give models that have fully converged or are close to convergence. 
-
-
-cv_runs = 24      # Testing only: 4, proper runs of the models: 24
-glm_iter = 500    # 500 epochs for gradient descent fitting of GLMs
-nn_cv_iter = 100  # Lower for CV to save running time
-mdn_iter = 1000   # Appears to need 1000 to give models that have fully converged or are close to convergence. 
-
-#Specify is development periods with no transactions to be filled in or not
-#filename="data_origframework.csv"
-#filename="data_origframework_nofills.csv"
-filename="data_origframework_nofills_nosttl.csv"
-
-#Labelling
-from datetime import datetime
-now=datetime.now()
-
+# Set pandas display options
 pd.options.display.float_format = '{:,.2f}'.format
 
+SEED = 42 
+rng = np.random.default_rng(SEED) 
+
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# Data
+# Data Loading and Processing
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+def load_and_process_data(config: ExperimentConfig) -> pd.DataFrame:
+    """
+    Load and process the claims data.
+    
+    Args:
+        config: Experiment configuration
+        
+    Returns:
+        Processed DataFrame
+    """
+    # Read in data
+    dat = pd.read_csv(
+        config.data.data_dir + config.data.filename
+    )
+    
+    # Data engineering - adds extra columns to dataset
+    dat["train_ind_time"] = (dat.payment_period <= config.data.cutoff1)
+    dat["test_ind_time"] = (dat.payment_period <= config.data.cutoff)
+    dat["train_settled"] = (dat.settle_period <= config.data.cutoff)
+    dat["settled_flag"] = (dat.settle_period <= config.data.cutoff1)
+    
+    dat['is_settled'] = dat['is_settled'].astype(int)
+    dat["is_settled_future"] = (dat.is_settled)
+    dat.loc[dat['payment_period'] > config.data.cutoff, 'is_settled_future'] = -1
+    dat["future_flag"] = ~dat["train_ind_time"]
+    
+    dat["future_paid_cum"] = (dat.log1_paid_cumulative)
+    dat.loc[dat['payment_period'] > config.data.cutoff, 'future_paid_cum'] = 12.3
+    
+    dat["L250k"] = 0
+    dat.loc[dat['claim_size'] > 250000, 'L250k'] = 1
+    
+    # Create current development mappings
+    currentdev = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['development_period'].to_dict()
+    dat['curr_dev'] = dat['claim_no'].map(currentdev)
+    #dat["curr_dev"].fillna(0, inplace=True)
+    dat["curr_dev"] = dat["curr_dev"].fillna(0)
+    
+    currentpaid = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['log1_paid_cumulative'].to_dict()
+    dat['curr_paid'] = dat['claim_no'].map(currentpaid)
+    #dat["curr_paid"].fillna(0, inplace=True)
+    dat["curr_paid"] = dat["curr_paid"].fillna(0)
+    
+    currentpmtno = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['pmt_no'].to_dict()
+    dat['curr_pmtno'] = dat['claim_no'].map(currentpmtno)
+    #dat["curr_pmtno"].fillna(0, inplace=True)
+    dat["curr_pmtno"] = dat["curr_pmtno"].fillna(0)
+    
+    return dat
 
-#Read in dat and create new train/test splits
-#dirname_in="https://raw.githubusercontent.com/MLRWP/mlrwp-book/main/Research/"
-dirname="/home/nigel/git/MLR_working_party/01_data/"
-#filename="data_origframework.csv"
-#filename="data_origframework_nofills.csv"
-filename="data_origframework_nofills_nosttl.csv"
-
-dat = pd.read_csv(
-    dirname + filename
-)
-
-dat
-
-
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# data engineering
-# adds 10 extra cols to dataset
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-dat["train_ind_time"] = (dat.payment_period <= cutoff1)
-dat["test_ind_time"] = (dat.payment_period <= cutoff)
-dat["train_settled"] = (dat.settle_period <= cutoff)
-dat["settled_flag"] = (dat.settle_period <= cutoff1)
-
-dat['is_settled'] = dat['is_settled'].astype(int)
-dat["is_settled_future"] = (dat.is_settled)
-dat.loc[dat['payment_period'] > cutoff, 'is_settled_future'] = -1
-dat["future_flag"]= ~dat["train_ind_time"]
-
-dat["future_paid_cum"] = (dat.log1_paid_cumulative)
-dat.loc[dat['payment_period'] > cutoff, 'future_paid_cum'] = 12.3
-
-dat["L250k"]=0
-dat.loc[dat['claim_size'] > 250000, 'L250k'] = 1
-
-currentdev = dat[dat['payment_period'] == cutoff].set_index('claim_no')['development_period'].to_dict()
-dat['curr_dev'] = dat['claim_no'].map(currentdev)
-dat["curr_dev"].fillna(0, inplace=True)
-
-currentpaid = dat[dat['payment_period'] == cutoff].set_index('claim_no')['log1_paid_cumulative'].to_dict()
-dat['curr_paid'] = dat['claim_no'].map(currentpaid)
-dat["curr_paid"].fillna(0, inplace=True)
-
-currentpmtno = dat[dat['payment_period'] == cutoff].set_index('claim_no')['pmt_no'].to_dict()
-dat['curr_pmtno'] = dat['claim_no'].map(currentpmtno)
-dat["curr_pmtno"].fillna(0, inplace=True)
+# Load data
+dat = load_and_process_data(config)
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# create train and test datasets
+# Dataset Creation
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-# Features to include per transaction
-features = [
-    "occurrence_time", 
-#    "initial_case_estimate",
-    "notidel", 
-    "development_period", 
-    "pmt_no",
-    "log1_paid_cumulative",
-#    "settled_flag",
-#    "is_settled",
-#    "future_paid_cum",
-#    "future_flag"
-#    "train_ind_time" #past flag
-#    "log1_incurred_cumulative",
-#    "max_paid_dev_factor",
-#    "min_paid_dev_factor",
-#    "max_incurred_dev_factor",
-#    "min_incurred_dev_factor",
-]
+def create_train_test_datasets(dat: pd.DataFrame, config: ExperimentConfig) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    """
+    Create training and test datasets from processed data.
+    
+    Args:
+        dat: Processed DataFrame
+        config: Experiment configuration
+        
+    Returns:
+        Tuple of (trainx, y_train, testx, y_test)
+    """
+    features = config.data.features
+    youtput = config.data.output_field
+    
+    # Training data: settled claims within training time period
+    trainx = dat.loc[
+        (dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1), 
+        features + ["claim_no"]
+    ]
+    y_train = dat.loc[
+        (dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)
+    ].groupby('claim_no')[youtput].last()
+    
+    # Test data: unsettled claims not in training set
+    testx = dat.loc[
+        (dat.test_ind_time == 1) & (dat.train_ind == 0) & (dat.train_settled == 0),
+        features + ["claim_no"]
+    ]
+    y_test = dat.loc[
+        (dat.train_ind_time == 1) & (dat.train_ind == 0) & (dat.train_settled == 0)
+    ].groupby('claim_no')[youtput].last()
+    
+    return trainx, y_train, testx, y_test
 
-data_cols=features + ["claim_no"]
+# Create datasets
+trainx, y_train, testx, y_test = create_train_test_datasets(dat, config)
 
-youtput="claim_size"
+# Extract configuration values for backwards compatibility
+features = config.data.features
+data_cols = config.data.data_cols
+youtput = config.data.output_field
 
-
-#X_train = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.is_settled == 1), list_of_features])
-#y_train = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.is_settled == 1), ["claim_size"]])
-
-#Rectangular
-#trainx = (dat.loc[(dat.train_ind == 1), features + ["claim_no"]])
-#y_train = (
-#    dat.loc[(dat.train_ind == 1)]
-#    .groupby('claim_no')[youtput].last()
-#)
-
-#testx = (dat.loc[(dat.train_ind == 0), features + ["claim_no"]])
-#y_test = (
-#    dat.loc[dat.train_ind == 0]
-#    .groupby('claim_no')[youtput].last()  
-#)
-
-#S3
-trainx = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1), features + ["claim_no"]])
-y_train = (
-    dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)]
-    .groupby('claim_no')[youtput].last()
-)
-
-#train: include outstanding claims too
-#trainx = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1), features + ["claim_no"]])
-#y_train = (
-#    dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1)]
-#    .groupby('claim_no')[youtput].last()
-#)
-
-testx = (dat.loc[(dat.test_ind_time == 1) & (dat.train_ind == 0) & (dat.train_settled == 0),  features + ["claim_no"]])
-y_test = (
-    dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 0) & (dat.train_settled == 0)]
-    .groupby('claim_no')[youtput].last()
-)
-
-#include settled claims too
-#testx = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 0),  features + ["claim_no"]])
-#y_test = (
-#    dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 0) & (dat.train_settled == 0)]
-#    .groupby('claim_no')[youtput].last()
-#)
-
-#S0
-#X_train = (dat.loc[(dat.train_ind == 1) & (dat.train_settled == 1), list_of_features])
-#y_train = (dat.loc[(dat.train_ind == 1) & (dat.train_settled == 1), ["claim_size"]])
-
-#X_test = (dat.loc[(dat.train_ind == 0) & (dat.train_settled == 1), list_of_features])
-#y_test = (dat.loc[(dat.train_ind == 0) & (dat.train_settled == 1), [youtput]])
-
-#S6
-#X_test = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 0), list_of_features])
-#y_test = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 0), ["payment_size_cumulative"]])
-
-#S5
-#X_test = (dat.loc[(dat.train_ind == 0) & (dat.train_settled == 0), list_of_features])
-#y_test = (dat.loc[(dat.train_ind == 0) & (dat.train_settled == 0), [youtput]])
-
-#S4
-#X_train = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1), list_of_features])
-#y_train = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1), ["payment_size_cumulative"]])
-
-
-#S2
-#X_train = (dat.loc[(dat.train_ind_time == 1) & (dat.is_settled == 1), list_of_features])
-#y_train = (dat.loc[(dat.train_ind_time == 1) & (dat.is_settled == 1), ["claim_size"]])
-
-#X_test = (dat.loc[(dat.train_ind_time == 0) & (dat.is_settled == 0), list_of_features])
-#y_test = (dat.loc[(dat.train_ind_time == 0) & (dat.is_settled == 0), ["claim_size"]])
-
-#X = (dat.loc[:, list_of_features])
-#y = (dat.loc[:, youtput])
-
-#Output files used to compare train and test subsets in Tableau
-#triangletrain = (X_train
-#    .groupby(["occurrence_time", "development_period"], as_index=False)
-#    .agg({"log1_paid_cumulative": "sum"})
-#    .sort_values(by=["occurrence_time", "development_period"])
-#)
-#trainsum=triangletrain.pivot(index = "occurrence_time", columns = "development_period", values = "log1_paid_cumulative")
-
-#trainsum.to_csv("/Users/sarahmacdonnell/Documents/Work/MLR_WP/Gregtraintri.csv")
-
-dat.loc[:, features + [youtput, "claim_no"]]
-
-
-nclms=trainx['claim_no'].nunique()
-print(isinstance(trainx, pd.DataFrame), nclms)
+# Print dataset info
+nclms = trainx['claim_no'].nunique()
+print(f"Training dataset - DataFrame: {isinstance(trainx, pd.DataFrame)}, Claims: {nclms}")
 nfeatures = len(features)
-print(nfeatures)  
+print(f"Number of features: {nfeatures}")  
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # classes to support modelling
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+# Initialize TensorBoard writer
 writer = SummaryWriter()  
 
 class TabularNetRegressor(BaseEstimator, RegressorMixin):
@@ -268,14 +188,16 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         clip_value=None,
         n_gaussians=3,
         verbose=1,                
-        device="cpu", #if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"),  # Use GPU if available, leave mps off until more stable
+        device="cpu", 
         init_bias=None,
+        enable_shap=True,  # Enable SHAP explanations
+        shap_log_frequency=500,  # Log SHAP every N epochs
         **kwargs
     ):
         """ Tabular Neural Network Regressor (for Claims Reserving)
 
         This trains a neural network with specified loss, Log Link and l1 LASSO penalties
-        using Pytorch. It has early stopping.
+        using Pytorch. It has early stopping and SHAP explainability.
 
         Args:
             module: pytorch nn.Module. Should have n_input and n_output as parameters and
@@ -284,9 +206,7 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
 
             criterion: pytorch loss function. Consider nn.PoissonNLLLoss for log link.
 
-            max_iter (int): Maximum number of epochs before training stops. 
-                Previously this used a high value for triangles since the record count is so small.
-                For larger regression problems, a lower number of iterations may be sufficient.
+            max_iter (int): Maximum number of epochs before training stops.
 
             max_lr (float): Min / Max learning rate - we will use one_cycle_lr
 
@@ -298,49 +218,68 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             rebatch_every_iter (int): redo batches every
 
             l1_penalty (float): l1 penalty factor. If not zero, is applied to 
-                the layers in the Module with names matching l1_applies_params.
+                parameters in l1_applies_params.
 
-                (we use l1_penalty because lambda is a reserved word in Python 
-                for anonymous functions)
+            l1_applies_params (list): Parameters to apply l1 penalty to.
 
-            weight_decay (float): weight decay - analogous to l2 penalty factor
-                Applied to all weights
+            weight_decay (float): L2 penalty to apply to all parameters
 
-            clip_value (None or float): clip gradient norms at a particular value
-            
-            n_hidden (int), batch_norm(bool), dropout (float), interactions(bool), n_gaussians(int): 
-                Passed to module. Hidden layer size, batch normalisation, dropout percentages, and interactions flag.
+            batch_norm (bool): Whether to use batch normalization
 
-            init_bias (coerces to torch.Tensor): set init_bias, passed to module. If none, default to np.log(y.mean()).values.astype(np.float32)
+            interactions (bool): Whether to use interaction terms
 
-            verbose (int): 0 means don't print. 1 means do print.
+            dropout (float): Dropout probability
+
+            clip_value (None or float): If not None, clip gradients to this value
+
+            verbose (int): Verbosity level
+
+            device (str): Device to use ('cpu', 'cuda', etc.)
+
+            init_bias (None or float): If not None, initialize output layer bias to this value
+
+            enable_shap (bool): Whether to enable SHAP explanations during training
+
+            shap_log_frequency (int): Frequency of SHAP logging (every N epochs)
         """
+        
         self.module = module
         self.criterion = criterion
+        self.max_iter = max_iter
+        self.max_lr = max_lr
         self.keep_best_model = keep_best_model
+        self.batch_function = batch_function
+        self.rebatch_every_iter = rebatch_every_iter
+        self.n_input = n_input
+        self.n_hidden = n_hidden
+        self.n_output = n_output
         self.l1_penalty = l1_penalty
         self.l1_applies_params = l1_applies_params
         self.weight_decay = weight_decay
-        self.max_iter = max_iter
-        self.n_hidden = n_hidden
         self.batch_norm = batch_norm
-        self.batch_function = batch_function
-        self.rebatch_every_iter = rebatch_every_iter
         self.interactions = interactions
         self.dropout = dropout
-        self.n_gaussians = n_gaussians
-        self.device = device
-        self.target_device = torch.device(device)    
-        self.max_lr = max_lr
-        self.init_bias = init_bias
-        self.print_loss_every_iter = max(1, int(max_iter / 10))
-        self.verbose = verbose
         self.clip_value = clip_value
+        self.n_gaussians = n_gaussians
+        self.verbose = verbose
+        self.device = device
+        self.init_bias = init_bias
+        self.enable_shap = enable_shap
+        self.shap_log_frequency = shap_log_frequency
         self.kwargs = kwargs
+        
+        # Target device for tensors
+        self.target_device = torch.device(device)
+        
+        # Training state
+        self.module_ = None
+        self.best_model = None
+        self.shap_explainer = None
+        self.print_loss_every_iter = kwargs.get('print_loss_every_iter', max(1, int(max_iter / 10)))
 
         
     def fix_array(self, y):
-        "Need to be picky about array formats"
+        """Need to be picky about array formats"""
         if isinstance(y, pd.DataFrame) or isinstance(y, pd.Series):
             y = y.values
         if y.ndim == 1:
@@ -388,15 +327,21 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         X_tensor = X.to(self.target_device)
         y_tensor = torch.from_numpy(self.fix_array(y)).to(self.target_device)
 
-        # Optimizer - the generically useful AdamW. Other options like SGD
-        # are also possible.
-        
-#        optimizer = torch.optim.SGD(
-#            params=self.module_.parameters(),
-#            lr=0.000000000001,
-#            weight_decay=self.weight_decay
-#        )
-        
+        # Initialize SHAP explainer if enabled
+        if self.enable_shap and self.shap_explainer is None:
+            try:
+                # Create background dataset for SHAP
+                background_data = create_background_dataset(X_tensor, n_samples=100)
+                feature_names = [f"Feature_{i}" for i in range(X_tensor.shape[-1])]
+                self.shap_explainer = ShapExplainer(self.module_, background_data, feature_names)
+                if self.verbose > 0:
+                    print("SHAP explainer initialized successfully")
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"Warning: Failed to initialize SHAP explainer: {e}")
+                self.enable_shap = False
+
+        # Optimizer - the generically useful AdamW. Other options like SGD are also possible.
         optimizer = torch.optim.AdamW(
             params=self.module_.parameters(),
             lr=self.max_lr / 10,
@@ -430,45 +375,38 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             self.module_.train()
             y_pred = self.module_(X_tensor_batch)  #  Apply current model
 
-#Tensorboard
-            expected=y_pred.detach().numpy()
-            ln_expected=np.log(expected)
-            ln_actual=np.log(y_tensor_batch)
-            diff=y_tensor_batch - expected
-#            writer.add_figure('AvsE', plt.scatter(y_tensor_batch, expected), global_step=epoch)
-#            writer.add_embedding(y_tensor_batch)
+            # Tensorboard logging
+            expected = y_pred.detach().cpu().numpy()
+            ln_expected = np.log(expected + 1e-8)  # Add small epsilon to avoid log(0)
+            ln_actual = np.log(y_tensor_batch.detach().cpu().numpy() + 1e-8)
+            diff = y_tensor_batch.detach().cpu().numpy() - expected
             
             loss = loss_fn(y_pred, y_tensor_batch) #  What is the loss on it?
-# Error 1: ((E-A)/A)^2
-#            loss = torch.mean(torch.square((y_pred - y_tensor_batch)/y_tensor_batch))
-# Error 1.1: ((E-A)/A)^2)*1000000
-#            loss = torch.mean(torch.square((y_pred - y_tensor_batch)/y_tensor_batch))*1000000
-# Error 2: (A-E)^2/E
-#            loss = torch.mean(torch.square((y_pred - y_tensor_batch))/y_pred)
-# Error 3: ((A/E)-1)^2
-#            loss = torch.mean(torch.square((y_pred / y_tensor_batch) - 1))
-# Error 4: (ln(A/F))^2
-#            loss = torch.mean(torch.square(torch.log(y_pred - y_tensor_batch)))
 
-# ((E-A)/E)^2
-#            loss = torch.mean(torch.square((y_pred - y_tensor_batch)/y_pred))
-
-    
-#Tensorboard
+            # Tensorboard logging - basic metrics
             writer.add_scalar("Loss", loss, epoch)
-#            writer.add_scalar("BestLoss", best_loss, epoch)
-#            print("BestLoss: ", best_loss, " Train Loss: ", loss.data.tolist(), " Epoch: ", epoch)
-
-#Learning rate
+            
+            # Learning rate logging
             current_lr = scheduler.get_last_lr()[0]  # Assuming one parameter group
             writer.add_scalar('Learning Rate', current_lr, epoch)
 
-# Weights and biases
+            # Weights and biases logging
             for name, param in self.module_.named_parameters():       
                 writer.add_histogram(name, param, epoch)
                 if param.grad is not None:
                     writer.add_histogram(f'{name}.grad', param.grad, epoch)
-#                print(f"Name: {name}, Value: {param}, Gradient: {param.grad}")
+
+            # SHAP explanations logging (less frequent to avoid performance issues)
+            if (self.enable_shap and self.shap_explainer is not None and 
+                epoch % self.shap_log_frequency == 0 and epoch > 0):
+                try:
+                    log_shap_explanations(
+                        writer, self.shap_explainer, X_tensor_batch, epoch, 
+                        prefix="Training_SHAP", max_samples=50
+                    )
+                except Exception as e:
+                    if self.verbose > 0:
+                        print(f"Warning: SHAP logging failed at epoch {epoch}: {e}")
                 
             if self.l1_penalty > 0.0:        #  Lasso penalty
                 loss += self.l1_penalty * sum(
@@ -543,7 +481,7 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
                 print(f"refreshing batch on epoch {epoch}")
                 X_tensor_batch, y_tensor_batch = self.batch_function(X_tensor, y_tensor)
         
-            if (epoch==nn_iter-1):
+            if (epoch==self.max_iter-1):
                 for name, param in self.module_.named_parameters():    
                     # Convert parameter tensor to numpy array and flatten it
                     param_np = param.detach().numpy().flatten()
@@ -649,248 +587,150 @@ preprocessor = ColumnTransformer(
 preprocessor.set_output(transform="pandas")
 
 
-class BasicLogGRU(nn.Module):
-    def __init__(
-        self,
-        n_input,
-        n_hidden,
-        n_output,
-        batch_norm,
-        dropout,
-        init_bias,
-        **kwargs
-    ):
-        super(BasicLogGRU, self).__init__()
-
-        self.n_hidden = n_hidden
-        self.batch_norm_enabled = batch_norm
-        
-        self.gru = nn.GRU(n_input, n_hidden, batch_first=True)
-
-        if self.batch_norm_enabled:
-            self.bn = nn.BatchNorm1d(n_hidden)
-            
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.fc = nn.Linear(n_hidden, n_output)
-
-        if isinstance(init_bias, float) or isinstance(init_bias, int):
-            self.fc.bias.data.fill_(init_bias)
-
-    def forward(self, x):
-        batch_size = x.size(0)
-
-        # GRU only needs one hidden state (h0), no cell state
-        h0 = torch.zeros(1, batch_size, self.n_hidden).to(x.device)
-
-        out, _ = self.gru(x, h0)
-
-        out = self.dropout(out[:, -1, :])  # Use the output from the last time step
-        out = self.fc(out)
-
-        return torch.exp(out)
-
-
-class BasicLogLSTM(nn.Module):
-    def __init__(
-        self, 
-        n_input, 
-        n_hidden, 
-        n_output,
-        init_bias,
-        batch_norm=False,
-        dropout=0.0,
-        **kwargs
-    ):
-        super(BasicLogLSTM, self).__init__()
-        
-        self.n_hidden = n_hidden
-        self.lstm = nn.LSTM(n_input, n_hidden, batch_first=True)
-
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-        self.fc = nn.Linear(n_hidden, n_output)
-#        self.init_bias = init_bias
-        if isinstance(init_bias, float) or isinstance(init_bias, int):
-            self.fc.bias.data.fill_(init_bias)
-
-    def forward(self, x):
-        batch_size = x.size(0)
-
-        # h0 and c0 are the hidden and cell states
-        h0 = torch.zeros(1, batch_size, self.n_hidden).to(x.device)
-        c0 = torch.zeros(1, batch_size, self.n_hidden).to(x.device)
-
-        out, _ = self.lstm(x, (h0, c0))  # LSTM returns (output, (hn, cn))
-
-        out = self.dropout(out[:, -1, :])  # Use last time step's output
-        out = self.fc(out)
-
-        return torch.exp(out)
-
-
-
-class BasicLogRNN(nn.Module):
-    def __init__(
-        self, 
-        n_input, 
-        n_hidden, 
-        n_output,
-        batch_norm,
-        dropout,
-        init_bias,
-    ):
-        super(BasicLogRNN, self).__init__()
-
-        self.n_hidden = n_hidden
-# the input data tensor has a shape of eg (batch size=100, 40, input_size=10), indicating 100 sequences/claims, 
-#each of length 40, with 10 features per time step
-
-        self.rnn = nn.RNN(n_input, n_hidden, batch_first=True) #The batch_first=True argument in nn.RNN indicates
-#that the input tensors are in the shape of (batch_size, sequence_length, input_size
-
-        self.fc = nn.Linear(n_hidden, n_output) #fully connected layer; mas to 20D hidden layer to a 1D output
-
-    def forward(self, x):
-        h0 = torch.zeros(1, x.size(0), self.n_hidden).to(x.device) #initialisation
-        out, _ = self.rnn(x, h0)
-        out = self.fc(out[:, -1, :]) 
-        return torch.exp(out)
-
-#n_input = 10 #number of features
-#n_hidden = 20
-#n_output = 1
-
-
-
-class LogLinkForwardNet(nn.Module):
-    # Define the parameters in __init__
-    def __init__(
-        self, 
-        n_hidden,                                          # hidden layer size
-        batch_norm,                                        # whether to do batch norm (boolean) 
-        dropout,                                           # dropout percentage,
-        init_bias,                                     # init mean value to speed up convergence        
-        n_input=8,                                         # number of inputs
-        n_output=1,                                        # number of outputs
-        
-    ): 
-
-        super(LogLinkForwardNet, self).__init__()
-
-        self.hidden = torch.nn.Linear(n_input, n_hidden)   # Hidden layer
-        self.hidden2 = torch.nn.Linear(n_hidden, n_hidden)  # New hidden layer
-#        self.hidden3 = torch.nn.Linear(n_hidden, n_hidden)  # Third hidden layer
-        
-        self.batch_norm = batch_norm
-        if batch_norm:
-            self.batchn = torch.nn.BatchNorm1d(n_hidden)   # Batchnorm layer
-        self.dropout = nn.Dropout(dropout)
-
-        self.linear = torch.nn.Linear(n_hidden, n_output)  # Linear coefficients
-
-        nn.init.zeros_(self.linear.weight)                 # Initialise to zero
-        # nn.init.constant_(self.linear.bias, init_bias)        
-        self.linear.bias.data = torch.tensor(init_bias)
-
-    # The forward function defines how you get y from X.
-    def forward(self, x):
-        
-        # First hidden layer
-        h = F.relu(self.hidden(x))
-#Not using batchnorm here otherwise would need to update these
-        if self.batch_norm:
-            h = self.batchn(h)
-        h = self.dropout(h)
-
-        # New second hidden layer
-        h2 = F.relu(self.hidden2(h))
-        if self.batch_norm:
-            h2 = self.batchn2(h2)
-        h2 = self.dropout(h2)
-
-        # Third hidden layer
-#        h3 = F.relu(self.hidden3(h2))
-#        if self.batch_norm:
-#            h3 = self.batchn3(h3)
-#        h3 = self.dropout(h3)
-
-#1 Layer:            
-        return torch.exp(self.linear(h2))                   # log(Y) = XB -> Y = exp(XB)        
-                
-#3 Layers:                
-#        return torch.exp(self.linear(h2))                   # log(Y) = XB -> Y = exp(XB)
-
-
-nfeatures
-
-
 model_NN = Pipeline(
     steps=[
         ("keep", ColumnKeeper(data_cols)),   
         ('zero_to_one', preprocessor),       # Important! Standardize deep learning inputs.
         ('3Dtensor', Make3D(features)),
-        ("model", TabularNetRegressor(BasicLogGRU, n_input=nfeatures, n_hidden=32, n_output=1, max_iter=nn_iter))
+        ("model", TabularNetRegressor(
+            BasicLogGRU, 
+            n_input=nfeatures, 
+            n_hidden=config.model.n_hidden, 
+            n_output=config.model.n_output, 
+            max_iter=config.training.nn_iter,
+            enable_shap=config.training.enable_shap,
+            shap_log_frequency=config.training.shap_log_frequency
+        ))
     ]
 )
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
-# Fit NN
+# Model Training
 #
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-import time
-# Start time
-start_time = time.time()
+def train_model(model, trainx, y_train, config: ExperimentConfig):
+    """
+    Train the neural network model with timing.
+    
+    Args:
+        model: The model pipeline to train
+        trainx: Training features
+        y_train: Training targets
+        config: Experiment configuration
+        
+    Returns:
+        Trained model and elapsed time
+    """
+    print("Starting model training...")
+    start_time = time.time()
+    
+    model.fit(trainx, y_train)
+    
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Training completed. Execution time: {elapsed_time:.6f} seconds")
+    
+    return model, elapsed_time
 
-model_NN.fit(
-    trainx,
-    y_train
-)
-
-# End time
-end_time = time.time()
-# Calculate elapsed time
-elapsed_time = end_time - start_time
-print(f"Execution time: {elapsed_time:.6f} seconds")
+# Train the model
+trained_model, training_time = train_model(model_NN, trainx, y_train, config)
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
-# Tensorboard outputs
+# Enhanced Tensorboard Outputs with SHAP Explanations
 #
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-youtput="claim_size"
+def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig):
+    """
+    Generate comprehensive tensorboard outputs including SHAP explanations.
+    
+    Args:
+        model: Trained model pipeline
+        dat: Original dataset
+        config: Experiment configuration
+    """
+    print("Generating enhanced tensorboard outputs...")
+    youtput = config.data.output_field
+    
+    # Training set analysis
+    train = dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)]
+    train_features = train[config.data.features + ["claim_no"]]
+    
+    # Generate predictions
+    y_pred = model.predict(train)
+    
+    # Merge predictions back into dataset
+    claim_nos = train["claim_no"].drop_duplicates()
+    pred_df = pd.DataFrame({
+        "claim_no": claim_nos.values,
+        "pred_claims": y_pred
+    })
+    
+    if "pred_claims" in train.columns:
+        train = train.drop(columns=["pred_claims"])
+    
+    train_pred = train.merge(pred_df, on="claim_no", how="left")
+    
+    # Feature engineering for analysis
+    train_pred["log_pred_claims"] = train_pred["pred_claims"].apply(lambda x: np.log(x+1))
+    train_pred["log_actual"] = train_pred[youtput].apply(lambda x: np.log(x+1))
+    train_pred["rpt_delay"] = np.ceil(train_pred.notidel).astype(int)
+    train_pred["diff"] = train_pred[youtput] - train_pred["pred_claims"]
+    train_pred["diffp"] = (train_pred[youtput] - train_pred["pred_claims"]) / train_pred[youtput]
+    
+    # Create quantile groups
+    train_pred["pred_claims_decile"] = pd.qcut(train_pred["pred_claims"], 10, labels=False, duplicates='drop')
+    train_pred["pred_claims_20cile"] = pd.qcut(train_pred["pred_claims"], 20, labels=False, duplicates='drop')
+    train_pred["log_pred_claims_decile"] = pd.qcut(train_pred["log_pred_claims"], 10, labels=False, duplicates='drop')
+    train_pred["log_pred_claims_20cile"] = pd.qcut(train_pred["log_pred_claims"], 20, labels=False, duplicates='drop')
+    
+    # Generate SHAP explanations for final model if enabled
+    if config.training.enable_shap:
+        try:
+            print("Generating SHAP explanations for trained model...")
+            
+            # Get the underlying neural network model
+            nn_model = model.named_steps['model'].module_
+            
+            # Transform features through the pipeline (excluding the final model step)  
+            pipeline_steps = model.steps[:-1]  # All steps except the model
+            feature_pipeline = Pipeline(pipeline_steps)
+            X_transformed = feature_pipeline.transform(train_features)
+            
+            # Convert to tensor
+            X_tensor = torch.tensor(X_transformed, dtype=torch.float32)
+            
+            # Create SHAP explainer
+            background_data = create_background_dataset(X_tensor, n_samples=100)
+            feature_names = config.data.features
+            shap_explainer = ShapExplainer(nn_model, background_data, feature_names)
+            
+            # Generate SHAP explanations for a sample of training data
+            sample_size = min(200, len(X_tensor))
+            #sample_indices = np.random.choice(len(X_tensor), sample_size, replace=False)
+            sample_indices = rng.choice(len(X_tensor), sample_size, replace=False)
+            X_sample = X_tensor[sample_indices]
+            
+            # Log SHAP explanations to tensorboard
+            log_shap_explanations(
+                writer, shap_explainer, X_sample, epoch=9999,  # Use high epoch number for final analysis
+                prefix="Final_Model_SHAP", max_samples=sample_size
+            )
+            
+            print("SHAP explanations logged to tensorboard successfully!")
+            
+        except Exception as e:
+            print(f"Warning: Failed to generate SHAP explanations: {e}")
+    
+    return train_pred
 
-train = (dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)])
-
-y_pred=model_NN.predict(train)
-
-#merge y_pred back into dat for each claim
-claim_nos = train["claim_no"].drop_duplicates()
-pred_df = pd.DataFrame({
-    "claim_no": claim_nos.values,
-    "pred_claims": y_pred
-})
-
-if "pred_claims" in train.columns:
-    train = train.drop(columns=["pred_claims"])
-
-train_pred = train.merge(pred_df, on="claim_no", how="left")
-
-train_pred["log_pred_claims"]=train_pred["pred_claims"].apply(lambda x: np.log(x+1))
-train_pred["log_actual"]=train_pred[youtput].apply(lambda x: np.log(x+1))
-
-train_pred["rpt_delay"]=np.ceil(train_pred.notidel).astype(int)
-
-train_pred["diff"]=train_pred[youtput]-train_pred["pred_claims"]
-train_pred["diffp"]=(train_pred[youtput]-train_pred["pred_claims"])/train_pred[youtput]
-
-train_pred["pred_claims_decile"] = pd.qcut(train_pred["pred_claims"], 10, labels=False, duplicates='drop')
-train_pred["pred_claims_20cile"] = pd.qcut(train_pred["pred_claims"], 20, labels=False, duplicates='drop')
-train_pred["log_pred_claims_decile"] = pd.qcut(train_pred["log_pred_claims"], 10, labels=False, duplicates='drop')
+# Generate enhanced outputs
+train_pred = generate_enhanced_tensorboard_outputs(trained_model, dat, config)
 train_pred["log_pred_claims_20cile"] = pd.qcut(train_pred["log_pred_claims"], 20, labels=False, duplicates='drop')
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
