@@ -228,6 +228,7 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
         mean_abs_shap = np.mean(np.abs(shap_values_2d), axis=0)
 
         # Log summary plot (bar)
+        print(f'{prefix}/Summary_Bar')
         summary_fig = explainer.create_summary_plot(
             shap_values, X, title=f"{prefix} Summary - Epoch {epoch}"
         )
@@ -235,9 +236,15 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
         plt.close(summary_fig)
 
         # --- NEW: Log beeswarm summary plot ---
-        beeswarm_fig = explainer.create_beeswarm_plot(
+        print(f'{prefix}/Summary_Beeswarm')
+        #beeswarm_fig = explainer.create_beeswarm_plot(
+        #    shap_values, X, title=f"{prefix} Beeswarm Summary - Epoch {epoch}"
+        #)
+
+        beeswarm_fig = explainer.create_summary_plot(
             shap_values, X, title=f"{prefix} Beeswarm Summary - Epoch {epoch}"
         )
+
         writer.add_figure(f'{prefix}/Summary_Beeswarm', beeswarm_fig, epoch)
         plt.close(beeswarm_fig)
 
@@ -257,6 +264,8 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
         # --- NEW: Log dependence plots for all features ---
         for feature_idx in range(num_features):
             feature_name = explainer.feature_names[feature_idx]
+
+            print(f'{prefix}/Dependence_Plot/{feature_name}')
     
             # Create the dependence plot for the current feature
             dependence_fig = explainer.create_dependence_plot(

@@ -332,7 +332,8 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             try:
                 # Create background dataset for SHAP
                 background_data = create_background_dataset(X_tensor, n_samples=100)
-                feature_names = [f"Feature_{i}" for i in range(X_tensor.shape[-1])]
+                #feature_names = [f"Feature_{i}" for i in range(X_tensor.shape[-1])]
+                feature_names = config.data.features
                 self.shap_explainer = ShapExplainer(self.module_, background_data, feature_names)
                 if self.verbose > 0:
                     print("SHAP explainer initialized successfully")
