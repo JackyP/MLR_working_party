@@ -62,6 +62,10 @@ class ShapExplainer:
             
         shap_values = self.explainer.shap_values(X_sample)
         
+
+        print(f'get_shap_values: shap_values.shape: {shap_values.shape}')
+
+
         if isinstance(shap_values, list):
             shap_values = shap_values[0]
             
@@ -213,13 +217,30 @@ class ShapExplainer:
 
 def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer, 
                          X: torch.Tensor, epoch: int, prefix: str = "SHAP",
-                         max_samples: int = 50) -> None:
+                         max_samples: int = 50, verbose: int = 2) -> None:
     """
     Generate and log SHAP explanations to tensorboard.
     """
+
+
     try:
+        #background_data = create_background_dataset(X, max_samples)
+        #shap_explainer = ShapExplainer(nn_model, background_data, feature_names)
+
+        #sample_indices = rng.choice(len(X_tensor), sample_size, replace=False)
+        #X_sample = X_tensor[sample_indices]
+                
+
+
         shap_values = explainer.get_shap_values(X, max_samples=max_samples)
-        
+
+        # debug printout        
+        if verbose == 2:
+            print(f'DEBUG: log_shap_explanations/X shape: {X.shape}')
+            print(f'DEBUG: log_shap_explanations/max_samples: {max_samples}')
+            print(f'DEBUG: shap_values.shape: {shap_values.shape}') 
+            print(f'DEBUG: shap_values[0] shape: {shap_values[0].shape}') 
+
         # --- MODIFIED: Calculate importance once for reuse ---
         if len(shap_values.shape) == 3:
             shap_values_2d = shap_values.reshape(-1, shap_values.shape[-1])
@@ -241,12 +262,12 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
         #    shap_values, X, title=f"{prefix} Beeswarm Summary - Epoch {epoch}"
         #)
 
-        beeswarm_fig = explainer.create_summary_plot(
-            shap_values, X, title=f"{prefix} Beeswarm Summary - Epoch {epoch}"
-        )
+        #beeswarm_fig = explainer.create_summary_plot(
+        #    shap_values, X, title=f"{prefix} Beeswarm Summary - Epoch {epoch}"
+        #)
 
-        writer.add_figure(f'{prefix}/Summary_Beeswarm', beeswarm_fig, epoch)
-        plt.close(beeswarm_fig)
+        #writer.add_figure(f'{prefix}/Summary_Beeswarm', beeswarm_fig, epoch)
+        #plt.close(beeswarm_fig)
 
         # --- NEW: Log dependence plot for the most important feature ---
         #top_feature_idx = np.argsort(mean_abs_shap)[-1]
@@ -258,27 +279,43 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
         #writer.add_figure(f'{prefix}/Dependence_Plot_Top_Feature', dependence_fig, epoch)
         #plt.close(dependence_fig)
 
+        descending_feature_indices = np.argsort(mean_abs_shap)[::-1]
+        #feature_names = config.data.features
 
-        num_features = len(explainer.feature_names)
+        #if verbose == 2:
+                #print(f'DEBUG: descending_feature_indices: {descending_feature_indices}')
+                
+        #num_features = len(explainer.feature_names)
 
         # --- NEW: Log dependence plots for all features ---
-        for feature_idx in range(num_features):
+        for rank, feature_idx in enumerate(descending_feature_indices):
+        #for feature_idx in range(num_features):
+            
             feature_name = explainer.feature_names[feature_idx]
 
+           # Optional: Get the mean importance for logging (not necessary for plotting)
+            importance_value = mean_abs_shap[feature_idx] 
+            
+            print(f'Feature Name: {feature_name} (Importance: {importance_value:.4f})')
             print(f'{prefix}/Dependence_Plot/{feature_name}')
-    
+            
             # Create the dependence plot for the current feature
+            # Note: Use the current feature_idx from the loop
             dependence_fig = explainer.create_dependence_plot(
                 shap_values, X, feature_idx=feature_idx,
                 title=f"{prefix} Dependence Plot for '{feature_name}' - Epoch {epoch}"
             )
-    
+            
             # Log the figure to the TensorBoard writer (or equivalent)
             # Note: Using the feature_name in the tag makes each plot unique
             writer.add_figure(f'{prefix}/Dependence_Plot/{feature_name}', dependence_fig, epoch)
-    
+
             # Close the figure to free up memory
             plt.close(dependence_fig)
+
+            # Optional: If you only want to plot the top N features, you can break the loop here
+            # if rank >= 9: # Stop after plotting the top 10 features
+            #     break
 
 
         # Log waterfall plot for first sample
@@ -305,6 +342,10 @@ def create_background_dataset(X: torch.Tensor, n_samples: int = 100) -> torch.Te
     """
     if X.shape[0] > n_samples:
         #indices = np.random.choice(X.shape[0], n_samples, replace=False)
+
+        SEED = 42 
+        rng = np.random.default_rng(SEED) 
+
         indices = rng.choice(X.shape[0], size=n_samples, replace=False)
         return X[indices]
     else:

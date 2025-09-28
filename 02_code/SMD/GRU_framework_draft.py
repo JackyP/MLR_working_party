@@ -401,9 +401,17 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             if (self.enable_shap and self.shap_explainer is not None and 
                 epoch % self.shap_log_frequency == 0 and epoch > 0):
                 try:
+
+                    # Generate SHAP explanations for a sample of training data
+                    sample_size = min(200, len( X_tensor_batch))
+                    print(f'sample_size: {sample_size}')
+                    #sample_indices = np.random.choice(len(X_tensor), sample_size, replace=False)
+                    sample_indices = rng.choice(len(X_tensor_batch), sample_size, replace=False)
+                    X_sample = X_tensor[sample_indices]
+
                     log_shap_explanations(
-                        writer, self.shap_explainer, X_tensor_batch, epoch, 
-                        prefix="Training_SHAP", max_samples=50
+                        writer, self.shap_explainer, X_sample, epoch, 
+                        prefix="Training_SHAP", max_samples=sample_size
                     )
                 except Exception as e:
                     if self.verbose > 0:
