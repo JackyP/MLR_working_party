@@ -1043,16 +1043,15 @@ for name, param in fitted_model.named_parameters():
 #print(keep_params['hidden.weight'])
 
 
-gradients = []
+#gradients = []
 
-for param in fitted_model.parameters():
-    if param.grad is not None:
-        gradients.append(param.grad.view(-1).cpu().numpy())
+#for param in fitted_model.parameters():
+#    if param.grad is not None:
+#        gradients.append(param.grad.view(-1).cpu().numpy())
 
-plt.hist(np.concatenate(gradients), bins=100)
-plt.title("Gradient Distribution")
-plt.xlabel("Gradient Value")
-plt.ylabel("Frequency")
-plt.show()
-
+#plt.hist(np.concatenate(gradients), bins=100)
+#plt.title("Gradient Distribution")
+#plt.xlabel("Gradient Value")
+#plt.ylabel("Frequency")
+#plt.show()
 

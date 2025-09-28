@@ -94,7 +94,7 @@ class ShapExplainer:
             X_np_reshaped = X_np
 
         shap.summary_plot(shap_values_reshaped, X_np_reshaped, feature_names=self.feature_names, 
-                         show=False, plot_type="bar")
+                         show=False, plot_type="bar", rng = np.random.default_rng(SEED))
         plt.title(title)
         fig = plt.gcf()
         plt.close()
@@ -118,7 +118,7 @@ class ShapExplainer:
             X_np_reshaped = X_np
 
         shap.summary_plot(shap_values_reshaped, X_np_reshaped, feature_names=self.feature_names,
-                          show=False, plot_type="dot") # "dot" creates the beeswarm plot
+                          show=False, plot_type="dot", rng = np.random.default_rng(SEED)) # "dot" creates the beeswarm plot
         plt.title(title)
         fig = plt.gcf()
         plt.tight_layout()
@@ -156,18 +156,49 @@ class ShapExplainer:
         """
         Create SHAP waterfall plot for a single prediction.
         """
+        
+        # 1. Calculate the Base Value (Expected Value)
+        base_value = None
+        if hasattr(self.explainer, 'expected_value'):
+            # This works for DeepExplainer or KernelExplainer
+            base_value = self.explainer.expected_value
+        else:
+            # **FIX FOR GradientExplainer:** Calculate base_value from background data
+            # Assuming self.background_data is the Tensor used to initialize the explainer
+            # and self.model is your GRU network
+            try:
+                # Move background data to the device the model is on (if necessary)
+                device = next(self.model.parameters()).device 
+                background_data_on_device = self.background_data.to(device)
+                
+                # Get the model's output (logit/probability) for the background data
+                with torch.no_grad():
+                    model_output = self.model(background_data_on_device).detach().cpu().numpy()
+                
+                # Calculate the average output (expected value)
+                base_value = np.mean(model_output, axis=0) 
+                
+            except Exception as e:
+                # Fallback if background data is not available or calculation fails
+                print(f"Error calculating base value for GradientExplainer: {e}")
+                return self._create_error_figure(title, "Base value calculation failed.")
+
+        # Handle multi-output base value (if applicable)
+        if hasattr(base_value, "__len__"):
+            base_value = base_value[0]
+
+        # --- Data Preparation (Existing Logic) ---
         avg_shap_values_sample = shap_values[sample_idx].mean(axis=0)
         
         if isinstance(X, torch.Tensor):
+            # Detach, move to CPU, convert to NumPy, then average across time steps (axis=0)
             X_np_sample = X[sample_idx].detach().cpu().numpy().mean(axis=0)
         else:
             X_np_sample = X[sample_idx].mean(axis=0)
 
-        base_value = self.explainer.expected_value
-        if hasattr(base_value, "__len__"):
-            base_value = base_value[0]
-
+        # --- Plotting (Existing Logic) ---
         if sample_idx < shap_values.shape[0]:
+            # This is critical: The shap.Explanation object expects a single scalar for base_values
             plt.figure(figsize=(10, 6))
             shap.waterfall_plot(
                 shap.Explanation(
@@ -183,11 +214,14 @@ class ShapExplainer:
             plt.close()
             return fig
         else:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.text(0.5, 0.5, f"Sample index {sample_idx} out of bounds", 
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(title)
-            return fig
+            return self._create_error_figure(title, f"Sample index {sample_idx} out of bounds")
+
+    # Helper function to prevent repetitive error figure code
+    def _create_error_figure(self, title, message):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, message, ha='center', va='center', transform=ax.transAxes)
+        ax.set_title(title)
+        return fig
     
     def create_feature_importance_plot(self, shap_values: np.ndarray, 
                                      title: str = "Feature Importance (SHAP)") -> plt.Figure:
@@ -224,13 +258,6 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
 
 
     try:
-        #background_data = create_background_dataset(X, max_samples)
-        #shap_explainer = ShapExplainer(nn_model, background_data, feature_names)
-
-        #sample_indices = rng.choice(len(X_tensor), sample_size, replace=False)
-        #X_sample = X_tensor[sample_indices]
-                
-
 
         shap_values = explainer.get_shap_values(X, max_samples=max_samples)
 
@@ -256,40 +283,19 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
         writer.add_figure(f'{prefix}/Summary_Bar', summary_fig, epoch)
         plt.close(summary_fig)
 
-        # --- NEW: Log beeswarm summary plot ---
+        # Log beeswarm summary plot
         print(f'{prefix}/Summary_Beeswarm')
-        #beeswarm_fig = explainer.create_beeswarm_plot(
-        #    shap_values, X, title=f"{prefix} Beeswarm Summary - Epoch {epoch}"
-        #)
-
-        #beeswarm_fig = explainer.create_summary_plot(
-        #    shap_values, X, title=f"{prefix} Beeswarm Summary - Epoch {epoch}"
-        #)
-
-        #writer.add_figure(f'{prefix}/Summary_Beeswarm', beeswarm_fig, epoch)
-        #plt.close(beeswarm_fig)
-
-        # --- NEW: Log dependence plot for the most important feature ---
-        #top_feature_idx = np.argsort(mean_abs_shap)[-1]
-        #top_feature_name = explainer.feature_names[top_feature_idx]
-        #dependence_fig = explainer.create_dependence_plot(
-        #    shap_values, X, feature_idx=top_feature_idx,
-        #    title=f"{prefix} Dependence Plot for '{top_feature_name}' - Epoch {epoch}"
-        #)
-        #writer.add_figure(f'{prefix}/Dependence_Plot_Top_Feature', dependence_fig, epoch)
-        #plt.close(dependence_fig)
+        beeswarm_fig = explainer.create_beeswarm_plot(
+            shap_values, X, title=f"{prefix} Beeswarm Summary - Epoch {epoch}"
+        )
+        
+        writer.add_figure(f'{prefix}/Summary_Beeswarm', beeswarm_fig, epoch)
+        plt.close(beeswarm_fig)
 
         descending_feature_indices = np.argsort(mean_abs_shap)[::-1]
-        #feature_names = config.data.features
-
-        #if verbose == 2:
-                #print(f'DEBUG: descending_feature_indices: {descending_feature_indices}')
-                
-        #num_features = len(explainer.feature_names)
-
+        
         # --- NEW: Log dependence plots for all features ---
         for rank, feature_idx in enumerate(descending_feature_indices):
-        #for feature_idx in range(num_features):
             
             feature_name = explainer.feature_names[feature_idx]
 
@@ -319,18 +325,14 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
 
 
         # Log waterfall plot for first sample
+        print(f'{prefix}/waterfall_plot')
+
         waterfall_fig = explainer.create_waterfall_plot(
             shap_values, X, sample_idx=0, title=f"{prefix} Waterfall - Epoch {epoch}"
         )
         writer.add_figure(f'{prefix}/Waterfall', waterfall_fig, epoch)
         plt.close(waterfall_fig)
-        
-        # Log SHAP values as histogram
-        writer.add_histogram(f'{prefix}/Values', shap_values.flatten(), epoch)
-        
-        # Log mean absolute SHAP values per feature
-        for i, feature_name in enumerate(explainer.feature_names):
-            writer.add_scalar(f'{prefix}/Feature_Importance/{feature_name}', mean_abs_shap[i], epoch)
+                
             
     except Exception as e:
         print(f"Warning: SHAP explanation logging failed at epoch {epoch}: {str(e)}")
