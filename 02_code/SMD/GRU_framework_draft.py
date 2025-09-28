@@ -332,7 +332,8 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             try:
                 # Create background dataset for SHAP
                 background_data = create_background_dataset(X_tensor, n_samples=100)
-                feature_names = [f"Feature_{i}" for i in range(X_tensor.shape[-1])]
+                #feature_names = [f"Feature_{i}" for i in range(X_tensor.shape[-1])]
+                feature_names = config.data.features
                 self.shap_explainer = ShapExplainer(self.module_, background_data, feature_names)
                 if self.verbose > 0:
                     print("SHAP explainer initialized successfully")
@@ -400,9 +401,17 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             if (self.enable_shap and self.shap_explainer is not None and 
                 epoch % self.shap_log_frequency == 0 and epoch > 0):
                 try:
+
+                    # Generate SHAP explanations for a sample of training data
+                    sample_size = min(200, len( X_tensor_batch))
+                    print(f'sample_size: {sample_size}')
+                    #sample_indices = np.random.choice(len(X_tensor), sample_size, replace=False)
+                    sample_indices = rng.choice(len(X_tensor_batch), sample_size, replace=False)
+                    X_sample = X_tensor[sample_indices]
+
                     log_shap_explanations(
-                        writer, self.shap_explainer, X_tensor_batch, epoch, 
-                        prefix="Training_SHAP", max_samples=50
+                        writer, self.shap_explainer, X_sample, epoch, 
+                        prefix="Training_SHAP", max_samples=sample_size
                     )
                 except Exception as e:
                     if self.verbose > 0:
@@ -1034,16 +1043,15 @@ for name, param in fitted_model.named_parameters():
 #print(keep_params['hidden.weight'])
 
 
-gradients = []
+#gradients = []
 
-for param in fitted_model.parameters():
-    if param.grad is not None:
-        gradients.append(param.grad.view(-1).cpu().numpy())
+#for param in fitted_model.parameters():
+#    if param.grad is not None:
+#        gradients.append(param.grad.view(-1).cpu().numpy())
 
-plt.hist(np.concatenate(gradients), bins=100)
-plt.title("Gradient Distribution")
-plt.xlabel("Gradient Value")
-plt.ylabel("Frequency")
-plt.show()
-
+#plt.hist(np.concatenate(gradients), bins=100)
+#plt.title("Gradient Distribution")
+#plt.xlabel("Gradient Value")
+#plt.ylabel("Frequency")
+#plt.show()
 
