@@ -24,7 +24,48 @@ In addition, a model registry and a function to retrieve model classes by name a
 """
 import pandas as pd
 import numpy as np
-from sklearn.utils.validation import check_is_fitted, check_consistent_length
+from sklearn.utils.validation import check_is_fitted, check_consistent_length, check_X_y
+import pandas as pd
+import numpy as np
+import matplotlib
+from matplotlib import pyplot as plt
+import time
+from datetime import datetime
+
+# PyTorch imports
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+from torch.utils.tensorboard import SummaryWriter
+from torch.autograd import Variable
+
+
+# Scikit-learn imports
+from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, MinMaxScaler
+from sklearn.pipeline import Pipeline
+
+from sklearn.metrics import mean_squared_error
+
+from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
+from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+from sklearn.ensemble import HistGradientBoostingRegressor
+
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, PredefinedSplit
+
+
+import chainladder as cl
+import math
+import random
+import shap
+
+
+# Local imports
+from utils.config import ExperimentConfig, load_config_from_yaml
+from utils.data_engineering import load_data, process_data, create_train_test_datasets
+from utils.tensorboard import generate_enhanced_tensorboard_outputs, create_actual_vs_expected_plot
+from utils.excel import save_df_to_excel
+
 from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
 
 
@@ -39,7 +80,7 @@ from torch.utils.tensorboard import SummaryWriter
 from typing import Optional
 
 # Local imports
-from utils.config import get_default_config
+#from utils.config import get_default_config
 from utils.shap import ShapExplainer, log_shap_explanations, create_background_dataset  
 
 
@@ -48,13 +89,13 @@ from utils.shap import ShapExplainer, log_shap_explanations, create_background_d
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 # Load configuration
-config = get_default_config()
+#config = get_default_config()
 
 # Set pandas display options
 pd.options.display.float_format = '{:,.2f}'.format
 
-SEED = 42 
-rng = np.random.default_rng(SEED) 
+matplotlib.use('Agg')  # Set non-interactive backend
+
 writer = SummaryWriter()  
 
 class TabularNetRegressor(BaseEstimator, RegressorMixin):
@@ -83,6 +124,9 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         init_bias=None,
         enable_shap=True,  # Enable SHAP explanations
         shap_log_frequency=500,  # Log SHAP every N epochs
+        seed = 42,
+        config = None,
+        init_extra=None,
         **kwargs
     ):
         """ Tabular Neural Network Regressor (for Claims Reserving)
@@ -157,6 +201,9 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         self.init_bias = init_bias
         self.enable_shap = enable_shap
         self.shap_log_frequency = shap_log_frequency
+        self.seed = seed
+        self.config = config
+        self.init_extra = init_extra if init_extra is not None else {}
         self.kwargs = kwargs
         
         # Target device for tensors
@@ -188,9 +235,10 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             n_hidden=self.n_hidden,
             batch_norm=self.batch_norm,
             dropout=self.dropout,
-#            interactions=self.interactions,
-#            n_gaussians=self.n_gaussians,
+            interactions_trainable=self.interactions,
+            n_gaussians=self.n_gaussians,
             init_bias=self.init_bias_calc if self.init_bias is None else self.init_bias,
+            init_extra=self.init_extra,
             **self.kwargs
         ).to(self.target_device)
         
@@ -212,18 +260,19 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
 
     def partial_fit(self, X, y):
         # Check that X and y have correct shape
-        check_consistent_length(X, y)
+        #X, y = check_X_y(X, y, multi_output=True)
+        X, y = check_X_y(X, y, multi_output=True, allow_nd=True) # all 3d to pass thru
 
         # Convert to Pytorch Tensor
-        X_tensor = X.to(self.target_device)
+        X_tensor = torch.from_numpy(self.fix_array(X)).to(self.target_device)
         y_tensor = torch.from_numpy(self.fix_array(y)).to(self.target_device)
-
+                
         # Initialize SHAP explainer if enabled
         if self.enable_shap and self.shap_explainer is None:
             try:
                 # Create background dataset for SHAP
                 background_data = create_background_dataset(X_tensor, n_samples=100)
-                feature_names = config.data.features
+                feature_names = self.config['data'].features
                 self.shap_explainer = ShapExplainer(self.module_, background_data, feature_names)
                 if self.verbose > 0:
                     print("SHAP explainer initialized successfully")
@@ -253,6 +302,13 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         except TypeError:
             loss_fn = self.criterion  # Custom loss function
 
+        
+        self.training_losses_history = []
+        self.training_rmses_history = []
+        self.saved_parameters = {}
+        self.testing_epochs = []
+     
+     
         best_loss = float('inf') # set to infinity initially
 
         if self.batch_function is not None:
@@ -265,6 +321,7 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
 
             self.module_.train()
             y_pred = self.module_(X_tensor_batch)  #  Apply current model
+            loss = loss_fn(y_pred, y_tensor_batch) #  What is the loss on it?
 
             # Tensorboard logging
             expected = y_pred.detach().cpu().numpy()
@@ -272,8 +329,6 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             ln_actual = np.log(y_tensor_batch.detach().cpu().numpy() + 1e-8)
             diff = y_tensor_batch.detach().cpu().numpy() - expected
             
-            loss = loss_fn(y_pred, y_tensor_batch) #  What is the loss on it?
-
             # Tensorboard logging - basic metrics
             writer.add_scalar("Loss", loss, epoch)
             
@@ -293,11 +348,18 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
                 try:
 
                     # Generate SHAP explanations for a sample of training data
-                    sample_size = min(200, len( X_tensor_batch))
+                    rng = np.random.default_rng(self.seed) 
+                    sample_size = min(200, len(X_tensor_batch))
                     print(f'sample_size: {sample_size}')
                     #sample_indices = np.random.choice(len(X_tensor), sample_size, replace=False)
                     sample_indices = rng.choice(len(X_tensor_batch), sample_size, replace=False)
+                    
                     X_sample = X_tensor[sample_indices]
+                    
+                    # Add debug prints before SHAP explanation
+                    #print(f"Background data shape: {background_data.shape}")
+                    #print(f"Current batch shape: {X_sample.shape}")
+                    #print(f"Features expected: {len(self.feature_names) if hasattr(self, 'feature_names') else 'unknown'}")
 
                     log_shap_explanations(
                         writer, self.shap_explainer, X_sample, epoch, 
@@ -340,15 +402,27 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             # Every self.print_loss_every_iter steps, print RMSE 
             if (epoch % self.print_loss_every_iter == 0) and (self.verbose > 0):
                 self.module_.eval()                     # Eval mode 
-                self.module_.point_estimates=True       # Distributional models - set to point                
-                y_pred_point = self.module_(X_tensor)   # Get "real" model estimates
-                assert(y_pred_point.size() == y_tensor.size())
-                rmse = torch.sqrt(torch.mean(torch.square(y_pred_point - y_tensor)))
+                self.module_.point_estimates=True       # Distributional models - set to point 
+
+                #Calculate the training loss on the entire dataset
+                with torch.no_grad():
+                    y_pred_full = self.module_(X_tensor)
+                    full_train_loss = loss_fn(y_pred_full, y_tensor).item()
+                    self.training_losses_history.append(full_train_loss)
+                    
+                    # Calculate the RMSE over the entire dataset
+                    rmse = torch.sqrt(torch.mean(torch.square(y_pred_full - y_tensor)))
+                    self.training_rmses_history.append(rmse.item())
+
+                # Save a deep copy of the model parameters
+                current_state_dict = self.module_.state_dict()
+                self.saved_parameters[epoch] = {k: v.clone().detach() for k, v in current_state_dict.items()}
+                self.testing_epochs.append(epoch)
+
                 self.module_.train()                     # back to training
                 self.module_.point_estimates=False       # Distributional models - set to point
                 
-                print("Train RMSE: ", rmse.data.tolist(), " Train Loss: ", loss.data.tolist(), " Epoch: ", epoch)
-
+                print(f"Epoch: {epoch} Train RMSE: {rmse.data.tolist()} Train Loss: {full_train_loss}")
 
                 #Tensorboard
                 writer.add_scalar("RMSE", rmse, epoch)
@@ -396,10 +470,10 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
     def predict(self, X, point_estimates=True):
         # Checks
         check_is_fitted(self)      # Check is fit had been called
-        check_consistent_length(X)
+        X = check_array(X, allow_nd=True)         # Check input, allow 3D+ arrays
 
         # Convert to Pytorch Tensor
-        X_tensor = X.to(self.target_device)
+        X_tensor = torch.from_numpy(self.fix_array(X)).to(self.target_device)
       
         self.module_.eval()  # Eval (prediction) mode
         self.module_.point_estimates = point_estimates
@@ -658,6 +732,43 @@ class BasicLogRNN(nn.Module):
         return torch.exp(self.linear(h))
 
 
+class FeedForwardNet(nn.Module):
+# Define the parameters in __init__
+    def __init__(
+        self,
+        n_input,
+        n_output,
+        init_bias,
+        n_hidden,
+        batch_norm,
+        dropout,
+        inverse_of_link_fn=torch.exp,
+        **kwargs
+    ):
+        super(FeedForwardNet, self).__init__()
+
+        self.hidden = nn.Linear(n_input, n_hidden)   # Hidden layer
+        self.batch_norm = batch_norm
+        if batch_norm:
+            self.batchn = nn.BatchNorm1d(n_hidden)   # Batchnorm layer
+        self.dropout = nn.Dropout(dropout)                 
+
+        self.linear = nn.Linear(n_hidden, n_output)  # Linear coefficients
+
+        nn.init.zeros_(self.linear.weight)                 # Initialise to zero
+        # nn.init.constant_(self.linear.bias, init_bias)        
+        #self.linear.bias.data = torch.tensor(init_bias)
+        self.linear.bias.data = torch.tensor(np.asarray(init_bias))
+
+    # The forward function defines how you get y from X.
+    def forward(self, x):
+        h = F.relu(self.hidden(x))                         # Apply hidden layer    
+        if self.batch_norm:
+            h = self.batchn(h)                       # Apply batchnorm   
+       
+        return torch.exp(self.linear(h))                   # log(Y) = XB -> Y = exp(XB)
+    
+   
 class LogLinkForwardNet(nn.Module):
     """
     Multi-layer feedforward network with log link for claims reserving.
@@ -731,13 +842,13 @@ class LogLinkForwardNet(nn.Module):
         return output
 
 
-
 # Model registry for easy access
 MODEL_REGISTRY = {
     'BasicLogGRU': BasicLogGRU,
     'BasicLogLSTM': BasicLogLSTM,
     'BasicLogRNN': BasicLogRNN,
     'LogLinkForwardNet': LogLinkForwardNet,
+    'FeedForwardNet': FeedForwardNet,
 }
 
 

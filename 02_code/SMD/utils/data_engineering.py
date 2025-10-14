@@ -36,14 +36,11 @@ def load_data(config: ExperimentConfig) -> pd.DataFrame:
         Processed DataFrame
     """
     # Read in data
-    #dat = pd.read_csv(
-    #    config.data.data_dir + config.data.filename
-    #)
     dat = pd.read_csv(
-        "https://raw.githubusercontent.com/agi-lab/SPLICE/main/datasets/complexity_1/payment_1.csv"
+        config['data'].data_dir + config['data'].filename
     )
+    
     return dat
-
 
 
 
@@ -106,8 +103,8 @@ def process_data_davide(config: ExperimentConfig, dat: pd.DataFrame) -> pd.DataF
     transactions["settle_period"] = np.ceil(transactions["occurrence_time"] + transactions["notidel"] + transactions["setldel"]).astype('int')
 
     # Apply cut-off since some of the logic in this notebook assumes an equal set of dimensions
-    transactions["development_period"] = np.minimum(transactions["payment_period"] - transactions["occurrence_period"], config.data.cutoff)  
-    num_dev_periods = config.data.cutoff - 1  # (transactions["payment_period"] - transactions["occurrence_period"]).max()
+    transactions["development_period"] = np.minimum(transactions["payment_period"] - transactions["occurrence_period"], config['data'].cutoff)  
+    num_dev_periods = config['data'].cutoff - 1  # (transactions["payment_period"] - transactions["occurrence_period"]).max()
 
     # Transactions summarised by claim/dev:
     transactions_group = (transactions
@@ -181,10 +178,8 @@ def process_data_davide(config: ExperimentConfig, dat: pd.DataFrame) -> pd.DataF
     # The notebook is created on an MacBook Pro M1, which supports GPU mode in float32 only.
     dat[dat.select_dtypes(np.float64).columns] = dat.select_dtypes(np.float64).astype(np.float32)
 
-    dat["train_ind"] = (dat.payment_period <= config.data.cutoff)
+    dat["train_ind"] = (dat.payment_period <= config['data'].cutoff)
     dat["cv_ind"] = dat.payment_period % 5  # Cross validate on this column
-
-
 
     return dat
 
@@ -203,7 +198,7 @@ def process_data(config: ExperimentConfig, dat: pd.DataFrame) -> pd.DataFrame:
     dat["noti_period"] = np.ceil(dat["occurrence_time"] + dat["notidel"]).astype('int')
     dat["settle_period"] = np.ceil(dat["occurrence_time"] + dat["notidel"] + dat["setldel"]).astype('int')
 
-    dat["development_period"] = np.minimum(dat["payment_period"] - dat["occurrence_period"], config.data.maxdev)  
+    dat["development_period"] = np.minimum(dat["payment_period"] - dat["occurrence_period"], config['data'].maxdev)  
     
     # Clean close to zero values
     dat["payment_size"] = np.where(abs(dat.payment_size) < 1e-2, 0.0, dat.payment_size)
@@ -215,15 +210,15 @@ def process_data(config: ExperimentConfig, dat: pd.DataFrame) -> pd.DataFrame:
     # Data engineering - adds extra columns to dataset
 
     dat["train_ind"] = (dat.claim_no % 10 >= 4)
-    dat["train_ind_time"] = (dat.payment_period <= config.data.cutoff)
+    dat["train_ind_time"] = (dat.payment_period <= config['data'].cutoff)
     #dat["cv_ind"] = dat.payment_period % 5
 
-    #dat["train_ind"] = (dat.payment_period <= config.data.cutoff)
+    #dat["train_ind"] = (dat.payment_period <= config['data'].cutoff)
     
-    #dat["train_ind_time"] = (dat.payment_period <= config.data.cutoff1)
-    dat["test_ind_time"] = (dat.payment_period <= config.data.cutoff)
-    dat["train_settled"] = (dat.settle_period <= config.data.cutoff)
-    dat["settled_flag"] = (dat.settle_period <= config.data.cutoff1)
+    #dat["train_ind_time"] = (dat.payment_period <= config['data'].cutoff1)
+    dat["test_ind_time"] = (dat.payment_period <= config['data'].cutoff)
+    dat["train_settled"] = (dat.settle_period <= config['data'].cutoff)
+    dat["settled_flag"] = (dat.settle_period <= config['data'].cutoff1)
     
     # Cumulative payments
     dat["payment_size_cumulative"] = dat[["claim_no", "payment_size"]].groupby('claim_no').cumsum()
@@ -233,30 +228,30 @@ def process_data(config: ExperimentConfig, dat: pd.DataFrame) -> pd.DataFrame:
 
     # Second stage repetition
     
-    dat["train_ind_time"] = (dat.payment_period <= config.data.cutoff1)
-    dat["test_ind_time"] = (dat.payment_period <= config.data.cutoff)
-    dat["train_settled"] = (dat.settle_period <= config.data.cutoff)
-    dat["settled_flag"] = (dat.settle_period <= config.data.cutoff1)
+    dat["train_ind_time"] = (dat.payment_period <= config['data'].cutoff1)
+    dat["test_ind_time"] = (dat.payment_period <= config['data'].cutoff)
+    dat["train_settled"] = (dat.settle_period <= config['data'].cutoff)
+    dat["settled_flag"] = (dat.settle_period <= config['data'].cutoff1)
 
     dat['is_settled'] = dat['is_settled'].astype(int)
     dat["is_settled_future"] = (dat.is_settled)
-    dat.loc[dat['payment_period'] > config.data.cutoff, 'is_settled_future'] = -1
+    dat.loc[dat['payment_period'] > config['data'].cutoff, 'is_settled_future'] = -1
     dat["future_flag"]= ~dat["train_ind_time"]
 
     dat["future_paid_cum"] = (dat.log1_paid_cumulative)
-    dat.loc[dat['payment_period'] > config.data.cutoff, 'future_paid_cum'] = 12.3
+    dat.loc[dat['payment_period'] > config['data'].cutoff, 'future_paid_cum'] = 12.3
 
     dat["L250k"]=0
     dat.loc[dat['claim_size'] > 250000, 'L250k'] = 1
 
     
-    currentdev = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['development_period'].to_dict()
+    currentdev = dat[dat['payment_period'] == config['data'].cutoff].set_index('claim_no')['development_period'].to_dict()
     dat['curr_dev'] = dat['claim_no'].map(currentdev).fillna(0)
 
-    currentpaid = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['log1_paid_cumulative'].to_dict()
+    currentpaid = dat[dat['payment_period'] == config['data'].cutoff].set_index('claim_no')['log1_paid_cumulative'].to_dict()
     dat['curr_paid'] = dat['claim_no'].map(currentpaid).fillna(0)
 
-    currentpmtno = dat[dat['payment_period'] == config.data.cutoff].set_index('claim_no')['pmt_no'].to_dict()
+    currentpmtno = dat[dat['payment_period'] == config['data'].cutoff].set_index('claim_no')['pmt_no'].to_dict()
     dat['curr_pmtno'] = dat['claim_no'].map(currentpmtno).fillna(0)
         
     return dat
@@ -278,8 +273,8 @@ def create_train_test_datasets(dat: pd.DataFrame, config: ExperimentConfig) -> T
     Returns:
         Tuple of (trainx, y_train, testx, y_test)
     """
-    features = config.data.features
-    y_output = config.data.output_field
+    features = config['data'].features
+    y_output = config['data'].output_field
    
     # Training data: settled claims within training time period
     trainx = dat.loc[
@@ -313,26 +308,26 @@ def create_train_test_datasets_davide(dat: pd.DataFrame, config: ExperimentConfi
     Returns:
         Tuple of (trainx, y_train, testx, y_test)
     """
-    features = config.data.features
-    y_output = config.data.output_field
+    features = config['data'].features
+    y_output = config['data'].output_field
     
     # Training data: settled claims within training time period
 
     trainx = dat.loc[
-        (dat.payment_period <= config.data.cutoff), 
+        (dat.payment_period <= config['data'].cutoff), 
         features + ["claim_no"]
     ]
     y_train = dat.loc[
-        (dat.payment_period <= config.data.cutoff)
+        (dat.payment_period <= config['data'].cutoff)
     ].groupby('claim_no')[y_output].last()
     
     # Test data: unsettled claims not in training set
     testx = dat.loc[
-        (dat.payment_period > config.data.cutoff),
+        (dat.payment_period > config['data'].cutoff),
         features + ["claim_no"]
     ]
     y_test = dat.loc[
-        (dat.payment_period > config.data.cutoff)
+        (dat.payment_period > config['data'].cutoff)
     ].groupby('claim_no')[y_output].last()
     
     return trainx, y_train, testx, y_test

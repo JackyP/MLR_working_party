@@ -282,7 +282,9 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
             shap_values_2d = shap_values.reshape(-1, shap_values.shape[-1])
         else:
             shap_values_2d = shap_values
+        
         mean_abs_shap = np.mean(np.abs(shap_values_2d), axis=0)
+        print(f'{prefix}/mean_abs_shap: {mean_abs_shap}')
 
         # Log summary plot (bar)
         print(f'{prefix}/Summary_Bar')
@@ -302,7 +304,8 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
         plt.close(beeswarm_fig)
 
         descending_feature_indices = np.argsort(mean_abs_shap)[::-1]
-        
+        print(f'{prefix}/descending_feature_indices: {descending_feature_indices}')
+
         # --- NEW: Log dependence plots for all features ---
         for rank, feature_idx in enumerate(descending_feature_indices):
             

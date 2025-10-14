@@ -1,4 +1,4 @@
-##########################################
+#########################################
 # Python script file equivalent of GRU 
 # notebook - Refactored with SHAP Integration
 #
@@ -25,7 +25,7 @@ from sklearn.pipeline import Pipeline
 
 
 # Local imports
-from utils.config import get_default_config, ExperimentConfig
+from utils.config import ExperimentConfig, load_config_from_yaml
 from utils.neural_networks import TabularNetRegressor, BasicLogGRU, ColumnKeeper, Make3D
 
 #from data_engineering import load_data, process_data_davide, create_train_test_datasets_davide
@@ -40,13 +40,13 @@ from utils.excel import save_df_to_excel
 
 matplotlib.use('Agg')
 
-# Load configuration
-config = get_default_config()
+# Load from YAML file
+config = load_config_from_yaml('configs/GRU_NJC_config.yaml')
 
 # Set pandas display options
 pd.options.display.float_format = '{:,.2f}'.format
 
-SEED = 42 
+SEED =  config['training'].seed # 42 
 rng = np.random.default_rng(SEED) 
 writer = SummaryWriter() 
 
@@ -54,7 +54,7 @@ writer = SummaryWriter()
 
 # Create timestamp
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_filename = f"log_NJC_GRU_outputs_{timestamp}.xlsx"
+log_filename = f"logs/log_NJC_GRU_outputs_{timestamp}.xlsx"
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -81,9 +81,9 @@ save_df_to_excel(testx, df_name="x_test", filename=log_filename, mode='a')
 save_df_to_excel(y_test, df_name="y_test", filename=log_filename, mode='a')
 
 # Extract configuration values for backwards compatibility
-features = config.data.features
-data_cols = config.data.data_cols
-youtput = config.data.output_field
+features = config['data'].features
+data_cols = config['data'].data_cols
+youtput = config['data'].output_field
 
 # Print dataset info
 nclms = trainx['claim_no'].nunique()
@@ -111,11 +111,13 @@ model_NN = Pipeline(
         ("model", TabularNetRegressor(
             BasicLogGRU, 
             #n_input=nfeatures, 
-            n_hidden=config.model.n_hidden, 
-            #n_output=config.model.n_output, 
-            max_iter=config.training.nn_iter,
-            enable_shap=config.training.enable_shap,
-            shap_log_frequency=config.training.shap_log_frequency
+            n_hidden=config['model'].n_hidden, 
+            #n_output=config['model'].n_output, 
+            max_iter=config['training'].nn_iter,
+            enable_shap=config['training'].enable_shap,
+            shap_log_frequency=config['tensorboard'].shap_log_frequency,
+            seed=SEED,
+            config = config
         ))
     ]
 )
@@ -394,15 +396,15 @@ for name, param in fitted_model.named_parameters():
 
 
 
-gradients = []
+#gradients = []
 
-for param in fitted_model.parameters():
-    if param.grad is not None:
-        gradients.append(param.grad.view(-1).cpu().numpy())
+#for param in fitted_model.parameters():
+#    if param.grad is not None:
+#        gradients.append(param.grad.view(-1).cpu().numpy())
 
-plt.hist(np.concatenate(gradients), bins=100)
-plt.title("Gradient Distribution")
-plt.xlabel("Gradient Value")
-plt.ylabel("Frequency")
-plt.show()
+#plt.hist(np.concatenate(gradients), bins=100)
+#plt.title("Gradient Distribution")
+#plt.xlabel("Gradient Value")
+#plt.ylabel("Frequency")
+#plt.show()
 

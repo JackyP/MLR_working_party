@@ -8,7 +8,6 @@ for claims reserving modeling.
 
 The following classes are defined
 
-
 """
 
 import pandas as pd
@@ -47,11 +46,11 @@ def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig):
         config: Experiment configuration
     """
     print("Generating enhanced tensorboard outputs...")
-    youtput = config.data.output_field
+    youtput = config['data'].output_field
     
     # Training set analysis
     train = dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)]
-    train_features = train[config.data.features + ["claim_no"]]
+    train_features = train[config['data'].features + ["claim_no"]]
     
     # Generate predictions
     y_pred = model.predict(train)
@@ -77,7 +76,7 @@ def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig):
     
     
     # Generate SHAP explanations for final model if enabled
-    if config.training.enable_shap:
+    if config['training'].enable_shap:
         try:
             print("Generating SHAP explanations for trained model...")
             
@@ -94,7 +93,7 @@ def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig):
             
             # Create SHAP explainer
             background_data = create_background_dataset(X_tensor, n_samples=100)
-            feature_names = config.data.features
+            feature_names = config['data'].features
             shap_explainer = ShapExplainer(nn_model, background_data, feature_names)
             
             # Generate SHAP explanations for a sample of training data
