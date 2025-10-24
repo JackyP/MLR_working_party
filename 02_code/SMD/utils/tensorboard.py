@@ -27,7 +27,7 @@ from utils.shap import ShapExplainer, log_shap_explanations, create_background_d
 
 SEED = 42 
 rng = np.random.default_rng(SEED) 
-writer = SummaryWriter()  
+#writer = SummaryWriter()  
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -36,7 +36,7 @@ writer = SummaryWriter()
 #
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig):
+def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig, writer: SummaryWriter):
     """
     Generate comprehensive tensorboard outputs including SHAP explanations.
     
@@ -44,19 +44,22 @@ def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig):
         model: Trained model pipeline
         dat: Original dataset
         config: Experiment configuration
+        writer : SummaryWriter, optional TensorBoard writer to log the figure
     """
     print("Generating enhanced tensorboard outputs...")
     youtput = config['data'].output_field
     
     # Training set analysis
-    train = dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)]
+    #train = dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)]
+    train = dat
     train_features = train[config['data'].features + ["claim_no"]]
     
     # Generate predictions
     y_pred = model.predict(train)
     
     # Merge predictions back into dataset
-    claim_nos = train["claim_no"].drop_duplicates()
+    #claim_nos = train["claim_no"].drop_duplicates()
+    claim_nos = train["claim_no"]
     pred_df = pd.DataFrame({
         "claim_no": claim_nos.values,
         "pred_claims": y_pred
@@ -104,7 +107,7 @@ def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig):
             
             # Log SHAP explanations to tensorboard
             log_shap_explanations(
-                writer, shap_explainer, X_sample, epoch=9999,  # Use high epoch number for final analysis
+                writer, shap_explainer, X_sample, epoch=config['training'].nn_iter,  # Use high epoch number for final analysis
                 prefix="Final_Model_SHAP", max_samples=sample_size
             )
             

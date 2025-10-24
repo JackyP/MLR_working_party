@@ -48,14 +48,14 @@ pd.options.display.float_format = '{:,.2f}'.format
 
 SEED =  config['training'].seed # 42 
 rng = np.random.default_rng(SEED) 
-writer = SummaryWriter() 
 
-
-
-# Create timestamp
+# Create timestamp for logging
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_filename = f"logs/log_NJC_GRU_outputs_{timestamp}.xlsx"
+run_name = f"GRU_experiment_NJC_{timestamp}"  # Customize as needed
 
+# Initialize TensorBoard writer
+writer = SummaryWriter(log_dir=f"runs/{run_name}")
+log_filename = f"logs/{run_name}.xlsx"
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Data Loading and Processing
@@ -116,8 +116,10 @@ model_NN = Pipeline(
             max_iter=config['training'].nn_iter,
             enable_shap=config['training'].enable_shap,
             shap_log_frequency=config['tensorboard'].shap_log_frequency,
+            device=config['model'].device,
             seed=SEED,
-            config = config
+            config = config,
+            writer = writer
         ))
     ]
 )
@@ -129,7 +131,8 @@ model_NN = Pipeline(
 #
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-def train_model(model, trainx, y_train, config: ExperimentConfig):
+#def train_model(model, trainx, y_train, config: ExperimentConfig, writer: SummaryWriter):
+def train_model(model, trainx, y_train):
     """
     Train the neural network model with timing.
     
@@ -154,14 +157,16 @@ def train_model(model, trainx, y_train, config: ExperimentConfig):
     return model, elapsed_time
 
 # Train the model
-trained_model, training_time = train_model(model_NN, trainx, y_train, config)
+trained_model, training_time = train_model(model_NN, trainx, y_train)
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Log outputs to tensorboard
 # Generate enhanced outputs
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-train_pred = generate_enhanced_tensorboard_outputs(trained_model, dat, config)
+dat_train = dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)]
+
+train_pred = generate_enhanced_tensorboard_outputs(trained_model, dat_train, config, writer=writer)
 
 save_df_to_excel(train_pred, df_name="pred_train", filename=log_filename, mode='a')
 

@@ -31,11 +31,14 @@ import matplotlib
 from matplotlib import pyplot as plt
 import time
 from datetime import datetime
+from typing import Optional
+
 
 # PyTorch imports
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.tensorboard import SummaryWriter
 from torch.autograd import Variable
 
@@ -50,14 +53,7 @@ from sklearn.metrics import mean_squared_error
 from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.ensemble import HistGradientBoostingRegressor
-
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, PredefinedSplit
-
-
-import chainladder as cl
-import math
-import random
-import shap
 
 
 # Local imports
@@ -65,23 +61,8 @@ from utils.config import ExperimentConfig, load_config_from_yaml
 from utils.data_engineering import load_data, process_data, create_train_test_datasets
 from utils.tensorboard import generate_enhanced_tensorboard_outputs, create_actual_vs_expected_plot
 from utils.excel import save_df_to_excel
-
-from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
-
-
-from matplotlib import pyplot as plt
-
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
-from torch.nn.utils.rnn import pad_sequence
-from torch.utils.tensorboard import SummaryWriter
-
-from typing import Optional
-
-# Local imports
-#from utils.config import get_default_config
 from utils.shap import ShapExplainer, log_shap_explanations, create_background_dataset  
+
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -102,7 +83,8 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
     def __init__(
         self, 
         module,
-        criterion=nn.MSELoss(),
+        #criterion=nn.MSELoss(),
+        criterion=nn.PoissonNLLLoss,
         max_iter=100,   
         max_lr=0.01,
         keep_best_model=False,
@@ -126,6 +108,7 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         shap_log_frequency=500,  # Log SHAP every N epochs
         seed = 42,
         config = None,
+        writer = None,
         init_extra=None,
         **kwargs
     ):
@@ -203,6 +186,7 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         self.shap_log_frequency = shap_log_frequency
         self.seed = seed
         self.config = config
+        self.writer = writer
         self.init_extra = init_extra if init_extra is not None else {}
         self.kwargs = kwargs
         
@@ -266,21 +250,7 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         # Convert to Pytorch Tensor
         X_tensor = torch.from_numpy(self.fix_array(X)).to(self.target_device)
         y_tensor = torch.from_numpy(self.fix_array(y)).to(self.target_device)
-                
-        # Initialize SHAP explainer if enabled
-        if self.enable_shap and self.shap_explainer is None:
-            try:
-                # Create background dataset for SHAP
-                background_data = create_background_dataset(X_tensor, n_samples=100)
-                feature_names = self.config['data'].features
-                self.shap_explainer = ShapExplainer(self.module_, background_data, feature_names)
-                if self.verbose > 0:
-                    print("SHAP explainer initialized successfully")
-            except Exception as e:
-                if self.verbose > 0:
-                    print(f"Warning: Failed to initialize SHAP explainer: {e}")
-                self.enable_shap = False
-
+        
         # Optimizer - the generically useful AdamW. Other options like SGD are also possible.
         optimizer = torch.optim.AdamW(
             params=self.module_.parameters(),
@@ -316,6 +286,20 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         else:
             X_tensor_batch, y_tensor_batch = X_tensor, y_tensor
 
+        # Initialize SHAP explainer if enabled
+        if self.enable_shap and self.shap_explainer is None:
+            try:
+                # Create background dataset for SHAP
+                background_data = create_background_dataset(X_tensor, n_samples=100)
+                feature_names = self.config['data'].features
+                self.shap_explainer = ShapExplainer(self.module_, background_data, feature_names)
+                if self.verbose > 0:
+                    print("SHAP explainer initialized successfully")
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"Warning: Failed to initialize SHAP explainer: {e}")
+                self.enable_shap = False
+
         # Training loop
         for epoch in range(self.max_iter):   # Repeat max_iter times
 
@@ -323,52 +307,6 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             y_pred = self.module_(X_tensor_batch)  #  Apply current model
             loss = loss_fn(y_pred, y_tensor_batch) #  What is the loss on it?
 
-            # Tensorboard logging
-            expected = y_pred.detach().cpu().numpy()
-            ln_expected = np.log(expected + 1e-8)  # Add small epsilon to avoid log(0)
-            ln_actual = np.log(y_tensor_batch.detach().cpu().numpy() + 1e-8)
-            diff = y_tensor_batch.detach().cpu().numpy() - expected
-            
-            # Tensorboard logging - basic metrics
-            writer.add_scalar("Loss", loss, epoch)
-            
-            # Learning rate logging
-            current_lr = scheduler.get_last_lr()[0]  # Assuming one parameter group
-            writer.add_scalar('Learning Rate', current_lr, epoch)
-
-            # Weights and biases logging
-            for name, param in self.module_.named_parameters():       
-                writer.add_histogram(name, param, epoch)
-                if param.grad is not None:
-                    writer.add_histogram(f'{name}.grad', param.grad, epoch)
-
-            # SHAP explanations logging (less frequent to avoid performance issues)
-            if (self.enable_shap and self.shap_explainer is not None and 
-                epoch % self.shap_log_frequency == 0 and epoch > 0):
-                try:
-
-                    # Generate SHAP explanations for a sample of training data
-                    rng = np.random.default_rng(self.seed) 
-                    sample_size = min(200, len(X_tensor_batch))
-                    print(f'sample_size: {sample_size}')
-                    #sample_indices = np.random.choice(len(X_tensor), sample_size, replace=False)
-                    sample_indices = rng.choice(len(X_tensor_batch), sample_size, replace=False)
-                    
-                    X_sample = X_tensor[sample_indices]
-                    
-                    # Add debug prints before SHAP explanation
-                    #print(f"Background data shape: {background_data.shape}")
-                    #print(f"Current batch shape: {X_sample.shape}")
-                    #print(f"Features expected: {len(self.feature_names) if hasattr(self, 'feature_names') else 'unknown'}")
-
-                    log_shap_explanations(
-                        writer, self.shap_explainer, X_sample, epoch, 
-                        prefix="Training_SHAP", max_samples=sample_size
-                    )
-                except Exception as e:
-                    if self.verbose > 0:
-                        print(f"Warning: SHAP logging failed at epoch {epoch}: {e}")
-                
             if self.l1_penalty > 0.0:        #  Lasso penalty
                 loss += self.l1_penalty * sum(
                     [
@@ -377,14 +315,15 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
                         if p in self.l1_applies_params
                     ]
                 )
-                
+
+
             if self.keep_best_model & (loss.item() < best_loss):
                 best_loss = loss.item()
                 self.best_model = self.module_.state_dict()
 
             optimizer.zero_grad()            #  Reset optimizer            
             loss.backward()                  #  Apply back propagation
-            
+
             # gradient norm clipping
             if self.clip_value is not None:
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.module_.parameters(), self.clip_value)
@@ -424,41 +363,94 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
                 
                 print(f"Epoch: {epoch} Train RMSE: {rmse.data.tolist()} Train Loss: {full_train_loss}")
 
-                #Tensorboard
-                writer.add_scalar("RMSE", rmse, epoch)
-                writer.add_histogram('Expected', expected, epoch)
-                writer.add_histogram('Diff', diff, epoch)
 
-                fig, ax = plt.subplots()
-                ax.scatter(y_tensor_batch, expected)
-                ax.set_xlabel('Actual', fontsize=15)
-                ax.set_ylabel('Expected', fontsize=15)
-                ax.set_title('A vs E')               
-                writer.add_figure('AvsE', fig, epoch)
+                # Tensorboard logging
+                if self.writer is not None:
+                    #expected = y_pred.detach().cpu().numpy()
+                    expected = y_pred.detach().numpy()
+                    ln_expected = np.log(expected + 1e-8)  # Add small epsilon to avoid log(0)
+                    #ln_actual = np.log(y_tensor_batch.detach().cpu().numpy() + 1e-8)
+                    ln_actual = np.log(y_tensor_batch + 1e-8)
+                    #diff = y_tensor_batch.detach().cpu().numpy() - expected
+                    diff = y_tensor_batch - expected
+                    
+                    # Tensorboard logging - basic metrics
+                    self.writer.add_scalar("Loss", loss, epoch)
+                    
+                    # Learning rate logging
+                    current_lr = scheduler.get_last_lr()[0]  # Assuming one parameter group
+                    self.writer.add_scalar('Learning Rate', current_lr, epoch)
 
-                fig, ax = plt.subplots()                
-                ax.scatter(ln_actual, ln_expected)
-                ax.plot([0,16],[0,16])
-                ax.set_xlabel('Actual', fontsize=15)
-                ax.set_ylabel('Expected', fontsize=15)
-                ax.set_title('A vs E Logged')               
-                writer.add_figure('AvsE Logged', fig, epoch)
+                    # Weights and biases logging
+                    for name, param in self.module_.named_parameters():       
+                        self.writer.add_histogram(name, param, epoch)
+                        if param.grad is not None:
+                            self.writer.add_histogram(f'{name}.grad', param.grad, epoch)
 
-                
+                    #Tensorboard
+                    self.writer.add_scalar("RMSE", rmse, epoch)
+                    self.writer.add_histogram('Expected', expected, epoch)
+                    self.writer.add_histogram('Diff', diff, epoch)
+
+                    fig, ax = plt.subplots()
+                    ax.scatter(y_tensor_batch, expected)
+                    ax.set_xlabel('Actual', fontsize=15)
+                    ax.set_ylabel('Expected', fontsize=15)
+                    ax.set_title('A vs E')               
+                    self.writer.add_figure('AvsE', fig, epoch)
+
+                    fig, ax = plt.subplots()                
+                    ax.scatter(ln_actual, ln_expected)
+                    ax.plot([0,16],[0,16])
+                    ax.set_xlabel('Actual', fontsize=15)
+                    ax.set_ylabel('Expected', fontsize=15)
+                    ax.set_title('A vs E Logged')               
+                    self.writer.add_figure('AvsE Logged', fig, epoch)
+                    
+                    if (epoch==self.max_iter-1):
+                        for name, param in self.module_.named_parameters():    
+                            # Convert parameter tensor to numpy array and flatten it
+                            param_np = param.detach().numpy().flatten()
+                            fig, ax = plt.subplots()
+                            ax.bar(range(len(param_np)), param_np)
+                            ax.set_title(f'Parameters/{name}')
+                            ax.set_xlabel('Parameter Node')
+                            ax.set_ylabel('Value')
+                            self.writer.add_figure(f'Parameters/{name}', fig, epoch)
+
+                    # SHAP explanations logging (less frequent to avoid performance issues)
+                    if (self.enable_shap and self.shap_explainer is not None and 
+                        epoch % self.shap_log_frequency == 0 and epoch > 0):
+                        try:
+
+                            # Generate SHAP explanations for a sample of training data
+                            rng = np.random.default_rng(self.seed) 
+                            sample_size = min(200, len(X_tensor_batch))
+                            print(f'sample_size: {sample_size}')
+                            #sample_indices = np.random.choice(len(X_tensor), sample_size, replace=False)
+                            sample_indices = rng.choice(len(X_tensor_batch), sample_size, replace=False)
+                            
+                            X_sample = X_tensor[sample_indices]
+                            
+                            # Add debug prints before SHAP explanation
+                            #print(f"Background data shape: {background_data.shape}")
+                            #print(f"Current batch shape: {X_sample.shape}")
+                            #print(f"Features expected: {len(self.feature_names) if hasattr(self, 'feature_names') else 'unknown'}")
+
+                            log_shap_explanations(
+                                self.writer, self.shap_explainer, X_sample, epoch, 
+                                prefix="Training_SHAP", max_samples=sample_size
+                            )
+                        except Exception as e:
+                            if self.verbose > 0:
+                                print(f"Warning: SHAP logging failed at epoch {epoch}: {e}")
+
+
             if (self.batch_function is not None) & (epoch % self.rebatch_every_iter == 0):
                 print(f"refreshing batch on epoch {epoch}")
                 X_tensor_batch, y_tensor_batch = self.batch_function(X_tensor, y_tensor)
         
-            if (epoch==self.max_iter-1):
-                for name, param in self.module_.named_parameters():    
-                    # Convert parameter tensor to numpy array and flatten it
-                    param_np = param.detach().numpy().flatten()
-                    fig, ax = plt.subplots()
-                    ax.bar(range(len(param_np)), param_np)
-                    ax.set_title(f'Parameters/{name}')
-                    ax.set_xlabel('Parameter Node')
-                    ax.set_ylabel('Value')
-                    writer.add_figure(f'Parameters/{name}', fig, epoch)
+           
 
         if self.keep_best_model:
             self.module_.load_state_dict(self.best_model)
@@ -480,7 +472,8 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
 
         # Apply current model and convert back to numpy
         if point_estimates:
-            y_pred = self.module_(X_tensor).cpu().detach().numpy()
+            #y_pred = self.module_(X_tensor).cpu().detach().numpy()
+            y_pred = self.module_(X_tensor).detach().numpy()
             if y_pred.shape[-1] == 1: 
                 return y_pred.ravel()
             else:
@@ -507,6 +500,59 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             _, hn = self.module_(X_tensor, return_hn=True)
 
         return hn.cpu().numpy()
+
+    def get_testing_losses(self, X_test, y_test):
+        """
+        Calculates and returns the testing losses and RMSEs using the parameters
+        saved during training.
+        """
+        # Check if any model parameters have been saved
+        if not hasattr(self, 'saved_parameters') or not self.saved_parameters:
+            print("No model parameters saved. Please run the training first.")
+            return [], []
+
+        # Prepare the test data as PyTorch tensors
+        X_test_tensor = torch.from_numpy(self.fix_array(X_test)).to(self.target_device)
+        y_test_tensor = torch.from_numpy(self.fix_array(y_test)).to(self.target_device)
+        
+        # Initialize the loss function
+        try:
+            loss_fn = self.criterion(log_input=False).to(self.target_device)
+        except TypeError:
+            # For custom loss functions
+            loss_fn = self.criterion
+
+        testing_losses = []
+        testing_rmses = []
+
+        # Iterate through the saved parameters
+        for epoch in self.testing_epochs:
+            # Load the model state from that specific epoch
+            self.module_.load_state_dict(self.saved_parameters[epoch])
+            self.module_.eval()  # Set the model to evaluation mode
+            self.module_.point_estimates = True  # Used for calculating loss and RMSE
+            
+            with torch.no_grad():
+                # Get predictions on the test set
+                y_pred_test = self.module_(X_test_tensor)
+                # Calculate and append test loss
+                test_loss = loss_fn(y_pred_test, y_test_tensor).item()
+                # Calculate and append test RMSE
+                test_rmse = torch.sqrt(torch.mean(torch.square(y_pred_test - y_test_tensor))).item()
+                
+                testing_losses.append(test_loss)
+                testing_rmses.append(test_rmse)
+        
+        # After the loop, restore the final model state (either the best or the last one)
+        if self.keep_best_model:
+            # Load the best-performing model
+            self.module_.load_state_dict(self.best_model)
+        else:
+            # Load the last saved state if not keeping the best model
+            self.module_.load_state_dict(self.saved_parameters[self.testing_epochs[-1]])
+
+        self.module_.eval() # Ensure the model is in evaluation mode after loading the state
+        return testing_losses, testing_rmses
 
 
 

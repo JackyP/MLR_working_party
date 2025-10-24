@@ -3,6 +3,9 @@ import numpy as np
 from matplotlib import pyplot as plt
 import time
 from datetime import datetime
+import plotly.express as px  # Add this import
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # PyTorch imports
 import torch
@@ -55,7 +58,12 @@ rng = np.random.default_rng(SEED)
 
 # Create timestamp for output files
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_filename = f"logs/log_NJC_NN_vs_GBM_outputs_{timestamp}.xlsx"
+run_name = f"FFNN_vs_GBM_experiment_NJC_{timestamp}"  # Customize as needed
+
+# Initialize TensorBoard writer
+writer = SummaryWriter(log_dir=f"runs/{run_name}")
+log_filename = f"logs/{run_name}.xlsx"
+
 
 print(f"Experiment timestamp: {timestamp}")
 print(f"Output file: {log_filename}")
@@ -216,11 +224,14 @@ def build_ffnn_pipeline(model):
         ]
     )
 
+
+# Don't log to tensorboard in CV (because sklearn can't pickle the writer object)
+# Don't use n_jobs >1 as sklearn can't read from utils when parallelizing
 model_ffnn_detailed = build_ffnn_pipeline(
     RandomizedSearchCV(
-        TabularNetRegressor(FeedForwardNet),
+        TabularNetRegressor(FeedForwardNet, device="cpu"),
         parameters_nn,
-        n_jobs=4,  # Run in parallel (small model)
+        n_jobs=1,  # Run in parallel (small model)
         n_iter=config['training'].cv_runs, # Models train slowly, so try only a few models
         cv=RollingOriginSplit(5,5).split(groups=nn_train.payment_period),
         random_state=42
@@ -252,6 +263,9 @@ print("best parameters:", bst_det)
 
 cv_results_detailed = pd.DataFrame(model_ffnn_detailed["model"].cv_results_)
 
+config['training'].enable_shap
+config['tensorboard'].shap_log_frequency
+config['training'].nn_iter
 
 # Refit best model for longer iters
 model_ffnn_detailed = build_ffnn_pipeline(
@@ -264,18 +278,473 @@ model_ffnn_detailed = build_ffnn_pipeline(
         max_iter=config['training'].nn_iter, 
         max_lr=bst_det["max_lr"],                
         batch_function=claim_sampler if use_batching_logic else None,                
-        rebatch_every_iter=config['training'].mdn_iter/10,  # takes over 1s to resample so iterate a few epochs per resample                
+        rebatch_every_iter=config['training'].mdn_iter/10,  # takes over 1s to resample so iterate a few epochs per resample,
+        enable_shap=config['training'].enable_shap,
+        shap_log_frequency=config['tensorboard'].shap_log_frequency,
+        device = "cpu",
+        seed=SEED,
+        config = config,
+        writer=writer,  # TensorBoard writer                
     )
 )
 
-train_data = nn_train_full if use_batching_logic else nn_train
-train_labels = train_data.loc[:, ["payment_size"]]
 
-model_ffnn_detailed.fit(train_data, train_labels)   pd.DataFrame(X_batched.numpy(), columns=features),
-        pd.DataFrame(y_batched.numpy(), columns=["payment_size"])
+
+if use_batching_logic:
+    model_ffnn_detailed.fit(
+        nn_train_full,
+        nn_train_full.loc[:, ["payment_size"]]
     )
 else: 
     model_ffnn_detailed.fit(
         nn_train,
         nn_train.loc[:, ["payment_size"]]
     )
+
+
+
+# Access the model data
+regressor_model = model_ffnn_detailed["model"]
+
+# Assuming you have your test data loaded and handled correctly
+if use_batching_logic:
+    X_test = nn_test
+    y_test = nn_test.loc[:, ["payment_size"]]
+else: 
+    X_test = nn_test
+    y_test = nn_test.loc[:, ["payment_size"]]
+
+# 1. Accedi all'oggetto del regressore all'interno della pipeline
+regressor_model = model_ffnn_detailed["model"]
+
+# 2. Trasforma i dati di test usando solo i passaggi di pre-processing della pipeline
+
+
+transformer_pipeline = Pipeline(
+    steps=[
+        ("keep", model_ffnn_detailed.named_steps["scaler"]),
+        ('zero_to_one', model_ffnn_detailed.named_steps["zero_to_one_2"]),
+    ]
+)
+X_test_transformed = transformer_pipeline.transform(X_test)
+
+test_loss, testing_rmses = regressor_model.get_testing_losses(X_test_transformed, y_test)
+
+# Create a DataFrame for the data
+df_eval = pd.DataFrame({
+    'epoch': regressor_model.testing_epochs,
+    'training_rmse': regressor_model.training_rmses_history,
+    'testing_rmse': testing_rmses,
+    'training_loss': regressor_model.training_losses_history,
+    'testing_loss': test_loss,
+})
+
+# --- PLOT 1: RMSE ---
+fig = px.line(
+    df_eval, 
+    x='epoch', 
+    y=['training_rmse', 'testing_rmse'], 
+    title="RMSE over Epochs",
+    labels={'value': 'RMSE', 'variable': 'Type'},
+    color_discrete_map={'training_rmse': 'cyan', 'testing_rmse': 'red'}
+)
+# Add markers to all lines
+fig.update_traces(mode='lines+markers')
+
+# Change the testing_rmse line to dashed style
+fig.update_traces(
+    selector={'name': 'testing_rmse'},
+    line={'dash': 'dash'}
+)
+
+# Move the legend to the top center, under the title
+fig.update_layout(
+    legend=dict(
+        orientation="h",  # 'h' for horizontal layout
+        yanchor="bottom", # Anchor the legend's bottom edge
+        y=1.02,           # Position the legend just above the plot area (1.0)
+        xanchor="center", # Anchor the legend's center
+        x=0.5             # Center the legend horizontally
+    )
+)
+
+fig.show()
+
+## --- PLOT 2: LOSS ---
+fig = px.line(
+    df_eval, 
+    x='epoch', 
+    y=['training_loss', 'testing_loss'], 
+    title="Loss over Epochs",
+    labels={'value': 'Loss', 'variable': 'Type'},
+    color_discrete_map={'training_loss': 'blue', 'testing_loss': 'orange'}
+)
+
+# Add markers to all lines
+fig.update_traces(mode='lines+markers')
+
+# Change the testing_rmse line to dashed style
+fig.update_traces(
+    selector={'name': 'testing_loss'},
+    line={'dash': 'dash'}
+)
+
+# Move the legend to the top center, under the title
+fig.update_layout(
+    legend=dict(
+        orientation="h",  # 'h' for horizontal layout
+        yanchor="bottom", # Anchor the legend's bottom edge
+        y=1.02,           # Position the legend just above the plot area (1.0)
+        xanchor="center", # Anchor the legend's center
+        x=0.5             # Center the legend horizontally
+    )
+)
+
+fig.show()
+
+
+# QQ plot for test set
+
+# Function to make a dataset with train payments and test predictions, and resulting triangle
+def make_pred_set_and_triangle(individual_model, train, test):
+    dat_model_pred = pd.concat(
+        [
+            train,
+            test.assign(payment_size = individual_model.predict(test))
+        ], 
+        axis="rows"
+    )
+    dat_model_pred["payment_size_cumulative"] = (
+        dat_model_pred[["claim_no", "payment_size"]].groupby('claim_no').cumsum()
+    )
+
+    triangle_model_ind = (dat_model_pred
+        .groupby(["occurrence_period", "development_period", "payment_period"], as_index=False)
+        .agg({"payment_size_cumulative": "sum", "payment_size": "sum"})
+        .sort_values(by=["occurrence_period", "development_period"])
+    )
+
+    return dat_model_pred, triangle_model_ind
+
+
+dat_ffnn_det_pred, triangle_ffnn_detailed = make_pred_set_and_triangle(model_ffnn_detailed, nn_train, nn_test)
+
+dat["pred_ffnn_claims"] = model_ffnn_detailed.predict(dat)
+test_data = dat.loc[dat.train_ind == 0].copy()
+test_data["pred_ffnn_claims_quantile"] = pd.qcut(test_data["pred_ffnn_claims"], 5000, labels=False, duplicates='drop')  # Group the test set predictions into 5000 quantiles
+X_sum_test = test_data.groupby("pred_ffnn_claims_quantile").agg("mean").reset_index()  # Calculate the mean for each quantile in the test set
+
+
+# Create subplots
+fig = make_subplots(rows=1, cols=2, subplot_titles=('Test QQ Plot (Original Values)', 'Test QQ Plot (Log-transformed Values)'))
+
+# --- Plot 1: QQ Plot with Original Values ---
+max_val = max(X_sum_test['payment_size'].max(), X_sum_test['pred_ffnn_claims'].max())
+
+fig.add_trace(
+    go.Scatter(
+        x=X_sum_test['payment_size'],
+        y=X_sum_test['pred_ffnn_claims'],
+        mode='markers',
+        name='Average by Quantile',
+        marker=dict(color='blue', opacity=0.7),
+        showlegend=False  # Disable global legend
+    ),
+    row=1, col=1
+)
+
+fig.add_trace(
+    go.Scatter(
+        x=[0, max_val],
+        y=[0, max_val],
+        mode='lines',
+        name='Ideal Prediction (y=x)',
+        line=dict(color='red', dash='dash'),
+        showlegend=False  # Disable global legend
+    ),
+    row=1, col=1
+)
+
+# --- Plot 2: QQ Plot with Log Values ---
+log_pred = np.log1p(X_sum_test['pred_ffnn_claims'])
+log_actual = np.log1p(X_sum_test['payment_size'])
+max_log_val = max(log_pred.max(), log_actual.max())
+
+fig.add_trace(
+    go.Scatter(
+        x=log_actual,
+        y=log_pred,
+        mode='markers',
+        #name='Average by Quantile (Log)',
+        marker=dict(color='blue', opacity=0.7),
+        showlegend=False  # Disable global legend
+    ),
+    row=1, col=2
+)
+
+fig.add_trace(
+    go.Scatter(
+        x=[0, max_log_val],
+        y=[0, max_log_val],
+        mode='lines',
+        #name='Ideal Prediction (y=x) (Log)',
+        line=dict(color='red', dash='dash'),
+        showlegend=False  # Disable global legend
+    ),
+    row=1, col=2
+)
+
+# Add separate legend annotations in the top left of each subplot
+fig.add_annotation(
+    text="<b>Legend</b><br>● Average by Quantile<br>━ Ideal Prediction (y=x)",
+    #xref="x1", yref="y1",  # Reference to first subplot's axes
+    # Set the reference frame for x and y to 'paper'
+    xref='paper', 
+    yref='paper',
+    x=0, y=1,  # Top left position
+    showarrow=False,
+    bgcolor="rgba(255,255,255,0.8)",
+    bordercolor="black",
+    borderwidth=1,
+    align="left"
+)
+
+fig.add_annotation(
+    text="<b>Legend</b><br>● Average by Quantile (Log)<br>━ Ideal Prediction (y=x) (Log)",
+    xref='paper', 
+    yref='paper',
+    x=0.75, y=1,  # Top left position
+    showarrow=False,
+    bgcolor="rgba(255,255,255,0.8)",
+    bordercolor="black",
+    borderwidth=1,
+    align="left"
+)
+
+# Update axes
+fig.update_xaxes(title_text='Actual Average per Quantile', row=1, col=1, showgrid=True)
+fig.update_yaxes(title_text='Predicted Average per Quantile', row=1, col=1, showgrid=True)
+fig.update_xaxes(title_text='Actual Average per Quantile (log-transformed)', row=1, col=2, showgrid=True)
+fig.update_yaxes(title_text='Predicted Average per Quantile (log-transformed)', row=1, col=2, showgrid=True)
+
+fig.update_layout(height=500, width=1000, title_text="QQ Plots for Test Set")
+
+fig.show()
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+#
+#
+# got here
+#
+# There is an issue with the log_shap_explanations function in utils/tensorboard.py
+# 
+# The issue relates to the partial dependencies loop where seem to have different dimensions 
+#
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+train_pred = generate_enhanced_tensorboard_outputs(model_ffnn_detailed, nn_train, config, writer=writer)
+
+
+
+
+
+
+
+
+
+
+# Local imports
+from utils.config import  ExperimentConfig
+from utils.shap import ShapExplainer, log_shap_explanations, create_background_dataset  
+
+
+
+
+
+
+## SHAP (SHapley Additive exPlanations) FFNN
+
+#model = model_ffnn_detailed
+#dat = nn_train
+
+
+print("Generating enhanced tensorboard outputs...")
+youtput = config['data'].output_field
+
+# Training set analysis
+#train = dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)]
+train = dat
+train_features = train[config['data'].features + ["claim_no"]]
+    
+# Generate predictions
+y_pred = model.predict(train)
+    
+# Merge predictions back into dataset
+claim_nos = train["claim_no"]
+pred_df = pd.DataFrame({
+    "claim_no": claim_nos.values,
+    "pred_claims": y_pred
+})
+
+if "pred_claims" in train.columns:
+    train = train.drop(columns=["pred_claims"])
+    
+train_pred = train.merge(pred_df, on="claim_no", how="left")
+        
+# Feature engineering for analysis
+train_pred["log_pred_claims"] = train_pred["pred_claims"].apply(lambda x: np.log(x+1))
+train_pred["log_actual"] = train_pred[youtput].apply(lambda x: np.log(x+1))
+train_pred["rpt_delay"] = np.ceil(train_pred.notidel).astype(int)
+train_pred["diff"] = train_pred[youtput] - train_pred["pred_claims"]
+train_pred["diffp"] = (train_pred[youtput] - train_pred["pred_claims"]) / train_pred[youtput]
+
+
+
+print("Generating SHAP explanations for trained model...")
+            
+# Get the underlying neural network model
+nn_model = model.named_steps['model'].module_
+            
+# Transform features through the pipeline (excluding the final model step)  
+pipeline_steps = model.steps[:-1]  # All steps except the model
+feature_pipeline = Pipeline(pipeline_steps)
+X_transformed = feature_pipeline.transform(train_features)
+            
+# Convert to tensor
+X_tensor = torch.tensor(X_transformed, dtype=torch.float32)
+            
+# Create SHAP explainer
+background_data = create_background_dataset(X_tensor, n_samples=100)
+feature_names = config['data'].features
+shap_explainer = ShapExplainer(nn_model, background_data, feature_names)
+            
+# Generate SHAP explanations for a sample of training data
+sample_size = min(200, len(X_tensor))
+#sample_indices = np.random.choice(len(X_tensor), sample_size, replace=False)
+sample_indices = rng.choice(len(X_tensor), sample_size, replace=False)
+X_sample = X_tensor[sample_indices]
+            
+# Log SHAP explanations to tensorboard
+log_shap_explanations(
+    writer, shap_explainer, X_sample, epoch=9999,  # Use high epoch number for final analysis
+    prefix="Final_Model_SHAP", max_samples=sample_size
+)
+            
+        print("SHAP explanations logged to tensorboard successfully!")
+            
+    except Exception as e:
+        print(f"Warning: Failed to generate SHAP explanations: {e}")
+
+
+shap_values = explainer.get_shap_values(X, max_samples=200)
+
+
+
+
+trained_model = model_ffnn_detailed["model"]
+
+
+
+    
+# Generate predictions
+y_pred = model_ffnn_detailed.predict(nn_train)
+
+
+type(trained_model)
+type(model_ffnn_detailed)
+
+nn_train.shape
+dat.shape
+
+
+
+print("Original feature list:", features)
+
+feature_names = features
+
+try:
+    feature_names = model_ffnn_detailed["scaler"].features
+    print("Features da ColumnKeeper:", feature_names)
+except AttributeError:
+    try:
+        feature_names = model_ffnn_detailed["keep"].get_feature_names_out()
+        print("Features da get_feature_names_out():", feature_names)
+    except:
+        feature_names = features 
+        print("Features original list:", feature_names)
+
+# data preparation
+best_nn_model = model_ffnn_detailed["model"]
+
+
+
+X_processed = model_ffnn_detailed["zero_to_one_2"].transform(
+    model_ffnn_detailed["scaler"].transform(nn_train)
+)
+
+if hasattr(X_processed, 'values'):
+    X_processed = X_processed.values
+
+# check on dimensions
+if len(feature_names) != X_processed.shape[1]:
+    print(f"Attention: {len(feature_names)} features names but {X_processed.shape[1]} columns!")
+    
+    feature_names = feature_names[:X_processed.shape[1]]
+    print("Feature names:", feature_names)
+
+
+def predict_fn(X):
+    if hasattr(X, 'values'):
+        X = X.values
+    if len(X.shape) == 1:
+        X = X.reshape(1, -1)
+    return best_nn_model.predict(X)
+
+# SHAP
+explainer = shap.KernelExplainer(predict_fn, X_processed[:100])
+shap_values = explainer.shap_values(X_processed[:1000])
+
+print("=== SHAP ANALYSIS ===")
+print(f"Observation Number: {len(shap_values)}")
+print(f"Features Number: {len(feature_names)}")
+
+# Feature importance 
+shap_df = pd.DataFrame({
+    'feature': feature_names,
+    'importance': np.abs(shap_values).mean(axis=0)
+}).sort_values('importance', ascending=False)
+
+print("\nTOP 10 FEATURES:")
+print(shap_df.head(10))
+
+# Plot 
+import plotly.express as px
+
+# Prepare data for Plotly summary plot (approximating SHAP beeswarm)
+df_shap = pd.DataFrame(shap_values, columns=feature_names)
+df_shap_long = df_shap.melt(var_name='feature', value_name='shap_value')
+
+X_df = pd.DataFrame(X_processed[:1000], columns=feature_names)
+X_long = X_df.melt(var_name='feature', value_name='feature_value')
+
+df_plot = pd.concat([df_shap_long, X_long[['feature_value']]], axis=1)
+
+# Sort features by mean absolute SHAP value
+mean_abs_shap = df_shap.abs().mean().sort_values(ascending=False)
+df_plot['feature'] = pd.Categorical(df_plot['feature'], categories=mean_abs_shap.index, ordered=True)
+
+fig = px.strip(df_plot, x='shap_value', y='feature', color='feature_value', orientation='h',
+               title='SHAP Feature Importance - Neural Network')
+fig.update_layout(height=700, width=1000)
+fig.show()
+
+# Bar plot
+plt.figure(figsize=(12, 8))
+shap.summary_plot(shap_values, X_processed[:1000], 
+                 feature_names=feature_names, plot_type="bar", show=False)
+plt.title('SHAP Feature Importance (Bar Plot)', fontsize=16)
+plt.tight_layout()
+plt.show()
