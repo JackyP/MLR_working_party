@@ -106,7 +106,7 @@ class ShapExplainer:
                          show=False, plot_type="bar", rng = np.random.default_rng(SEED))
         plt.title(title)
         fig = plt.gcf()
-        plt.close()
+        plt.close(fig)
         return fig
 
     # --- NEW: Beeswarm Plot Function ---
@@ -131,7 +131,7 @@ class ShapExplainer:
         plt.title(title)
         fig = plt.gcf()
         plt.tight_layout()
-        plt.close()
+        plt.close(fig)
         return fig
 
     # --- NEW: Partial Dependence Plot Function ---
@@ -157,7 +157,7 @@ class ShapExplainer:
         plt.title(title)
         fig = plt.gcf()
         plt.tight_layout()
-        plt.close()
+        plt.close(fig)
         return fig
 
     def create_waterfall_plot(self, shap_values: np.ndarray, X: torch.Tensor, 
@@ -220,7 +220,7 @@ class ShapExplainer:
             )
             plt.title(title)
             fig = plt.gcf()
-            plt.close()
+            plt.close(fig)
             return fig
         else:
             return self._create_error_figure(title, f"Sample index {sample_idx} out of bounds")
@@ -255,6 +255,7 @@ class ShapExplainer:
         ax.set_yticklabels([self.feature_names[i] for i in indices])
         
         plt.tight_layout()
+        plt.close(fig)
         return fig
 
 

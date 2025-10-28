@@ -545,55 +545,27 @@ fig.show()
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
-train_pred = generate_enhanced_tensorboard_outputs(model_ffnn_detailed, nn_train, config, writer=writer)
-
-
-
-
-
-
-
-
+#train_pred = generate_enhanced_tensorboard_outputs(model_ffnn_detailed, nn_train, config, writer=writer)
 
 
 # Local imports
 from utils.config import  ExperimentConfig
 from utils.shap import ShapExplainer, log_shap_explanations, create_background_dataset  
 
-
-
-
-
-
 ## SHAP (SHapley Additive exPlanations) FFNN
 
-#model = model_ffnn_detailed
-#dat = nn_train
+model = model_ffnn_detailed
+dat = nn_train
 
 
 print("Generating enhanced tensorboard outputs...")
 youtput = config['data'].output_field
 
 # Training set analysis
-#train = dat.loc[(dat.train_ind_time == 1) & (dat.train_ind == 1) & (dat.train_settled == 1)]
-train = dat
-train_features = train[config['data'].features + ["claim_no"]]
-    
-# Generate predictions
-y_pred = model.predict(train)
-    
-# Merge predictions back into dataset
-claim_nos = train["claim_no"]
-pred_df = pd.DataFrame({
-    "claim_no": claim_nos.values,
-    "pred_claims": y_pred
-})
+train_pred = dat[config['data'].features + ["claim_no", youtput]].copy()
+train_pred.loc[:,'pred_claims'] = model.predict(train_pred)
 
-if "pred_claims" in train.columns:
-    train = train.drop(columns=["pred_claims"])
-    
-train_pred = train.merge(pred_df, on="claim_no", how="left")
-        
+       
 # Feature engineering for analysis
 train_pred["log_pred_claims"] = train_pred["pred_claims"].apply(lambda x: np.log(x+1))
 train_pred["log_actual"] = train_pred[youtput].apply(lambda x: np.log(x+1))
@@ -633,16 +605,41 @@ log_shap_explanations(
     prefix="Final_Model_SHAP", max_samples=sample_size
 )
             
-        print("SHAP explanations logged to tensorboard successfully!")
-            
-    except Exception as e:
-        print(f"Warning: Failed to generate SHAP explanations: {e}")
 
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+#
+# Log SHAP explanations to tensorboard
+#
+#
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+prefix="Final_Model_SHAP"
+epoch=9999
 
-shap_values = explainer.get_shap_values(X, max_samples=200)
+explainer = shap_explainer
+shap_values = explainer.get_shap_values(X_sample, max_samples=200)
 
+print(f'DEBUG: log_shap_explanations/X shape: {X_sample.shape}')
+print(f'DEBUG: shap_values.shape: {shap_values.shape}') 
+print(f'DEBUG: shap_values[0] shape: {shap_values[0].shape}')
 
+len(shap_values.shape)
+shap_values_2d = shap_values.reshape(-1, shap_values.shape[-1])
 
+mean_abs_shap = np.mean(np.abs(shap_values_2d), axis=0)
+print(f'{prefix}/mean_abs_shap: {mean_abs_shap}')
+
+import matplotlib
+
+matplotlib.use('Agg')
+summary_fig = explainer.create_summary_plot(shap_values, X_sample, title=f"{prefix} Summary - Epoch {epoch}")
+summary_fig.savefig('shap_summary_plot.png')
+
+fig = plt.gcf()
+
+summary_fig
+summary_fig.show()
+type(summary_fig)
 
 trained_model = model_ffnn_detailed["model"]
 

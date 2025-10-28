@@ -433,9 +433,9 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
                             X_sample = X_tensor[sample_indices]
                             
                             # Add debug prints before SHAP explanation
-                            #print(f"Background data shape: {background_data.shape}")
-                            #print(f"Current batch shape: {X_sample.shape}")
-                            #print(f"Features expected: {len(self.feature_names) if hasattr(self, 'feature_names') else 'unknown'}")
+                            print(f"Background data shape: {background_data.shape}")
+                            print(f"Current batch shape: {X_sample.shape}")
+                            print(f"Features expected: {len(self.feature_names) if hasattr(self, 'feature_names') else 'unknown'}")
 
                             log_shap_explanations(
                                 self.writer, self.shap_explainer, X_sample, epoch, 

@@ -58,13 +58,23 @@ def generate_enhanced_tensorboard_outputs(model, dat, config: ExperimentConfig, 
     y_pred = model.predict(train)
     
     # Merge predictions back into dataset
-    #claim_nos = train["claim_no"].drop_duplicates()
+    claim_nos_dedup = train["claim_no"].drop_duplicates()
     claim_nos = train["claim_no"]
-    pred_df = pd.DataFrame({
-        "claim_no": claim_nos.values,
-        "pred_claims": y_pred
-    })
     
+    if(len(claim_nos) == len(y_pred)):
+        pred_df = pd.DataFrame({
+            "claim_no": claim_nos.values,
+            "pred_claims": y_pred
+        })
+    elif(len(claim_nos_dedup) == len(y_pred)):
+        pred_df = pd.DataFrame({
+            "claim_no": claim_nos_dedup.values,
+            "pred_claims": y_pred
+        })
+    else:
+        print("Length of predictions does not match number of claim numbers.")
+
+
     if "pred_claims" in train.columns:
         train = train.drop(columns=["pred_claims"])
     
