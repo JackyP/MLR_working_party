@@ -12,6 +12,12 @@ It includes:
 - Functions to create background datasets for SHAP explainers.
 
 
+Issues outstanding
+ - Waterfall plot not rendering in both GRU and NN
+ - AI generated code using old API approach; need to upgrade the code to use shap.Explanation objects throughout
+ - need to make code more robust against different model output shapes and types (have basically hardcoded for now) 
+
+
 """
 
 import numpy as np
@@ -144,6 +150,9 @@ class ShapExplainer:
         
         X_np = X.detach().cpu().numpy() if isinstance(X, torch.Tensor) else X
 
+
+        # NJC this looks like repetitive code (log_shap_explanations) - can we refactor?
+
         if len(X_np.shape) == 3:
             shap_values_reshaped = shap_values.reshape(-1, shap_values.shape[-1])
             X_np_reshaped = X_np.reshape(-1, X_np.shape[-1])
@@ -166,6 +175,8 @@ class ShapExplainer:
         Create SHAP waterfall plot for a single prediction.
         """
         
+        print(f"Waterfall start: sample_idx={sample_idx}")
+
         # 1. Calculate the Base Value (Expected Value)
         base_value = None
         if hasattr(self.explainer, 'expected_value'):
@@ -187,6 +198,8 @@ class ShapExplainer:
                 # Calculate the average output (expected value)
                 base_value = np.mean(model_output, axis=0) 
                 
+                print(f"Waterfall base_value: {base_value}")
+
             except Exception as e:
                 # Fallback if background data is not available or calculation fails
                 print(f"Error calculating base value for GradientExplainer: {e}")
@@ -197,13 +210,18 @@ class ShapExplainer:
             base_value = base_value[0]
 
         # --- Data Preparation (Existing Logic) ---
-        avg_shap_values_sample = shap_values[sample_idx].mean(axis=0)
+        #avg_shap_values_sample = shap_values[sample_idx].mean(axis=1)
+        avg_shap_values_sample = shap_values[sample_idx]
         
+        print(f"Waterfall avg_shap_values_sample: {avg_shap_values_sample}")
+
         if isinstance(X, torch.Tensor):
             # Detach, move to CPU, convert to NumPy, then average across time steps (axis=0)
-            X_np_sample = X[sample_idx].detach().cpu().numpy().mean(axis=0)
+            #X_np_sample = X[sample_idx].detach().cpu().numpy().mean(axis=0)
+            X_np_sample = X[sample_idx].detach().cpu().numpy()
         else:
-            X_np_sample = X[sample_idx].mean(axis=0)
+            #X_np_sample = X[sample_idx].mean(axis=0)
+            X_np_sample = X[sample_idx]
 
         # --- Plotting (Existing Logic) ---
         if sample_idx < shap_values.shape[0]:
@@ -277,14 +295,23 @@ def log_shap_explanations(writer: SummaryWriter, explainer: ShapExplainer,
             print(f'DEBUG: log_shap_explanations/max_samples: {max_samples}')
             print(f'DEBUG: shap_values.shape: {shap_values.shape}') 
             print(f'DEBUG: shap_values[0] shape: {shap_values[0].shape}') 
+            print(f'DEBUG: len(shap_values.shape): {len(shap_values.shape)}') 
 
         # --- MODIFIED: Calculate importance once for reuse ---
-        if len(shap_values.shape) == 3:
-            shap_values_2d = shap_values.reshape(-1, shap_values.shape[-1])
-        else:
-            shap_values_2d = shap_values
+        # NJC this needs refactoring to handle different shapes more robustly
+        # and/or update with new API calls?
         
-        mean_abs_shap = np.mean(np.abs(shap_values_2d), axis=0)
+        if len(shap_values.shape) == 3:
+            if shap_values.shape[2] == 1: # e.g., FFNN with single output
+                shap_values_2d = shap_values.reshape(-1, shap_values.shape[1])
+                print(f'DEBUG: shap_values_2d = shap_values.reshape(-1, shap_values.shape[1])') 
+            else:
+                shap_values_2d = shap_values.reshape(-1, shap_values.shape[-1]) # e.g., GRU with sequence input
+                print(f'DEBUG: shap_values_2d = shap_values.reshape(-1, shap_values.shape[-1])') 
+        
+            shap_values = shap_values_2d
+        
+        mean_abs_shap = np.mean(np.abs(shap_values), axis=0)
         print(f'{prefix}/mean_abs_shap: {mean_abs_shap}')
 
         # Log summary plot (bar)

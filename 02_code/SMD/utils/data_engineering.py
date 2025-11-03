@@ -106,6 +106,11 @@ def process_data_davide(config: ExperimentConfig, dat: pd.DataFrame) -> pd.DataF
     transactions["development_period"] = np.minimum(transactions["payment_period"] - transactions["occurrence_period"], config['data'].cutoff)  
     num_dev_periods = config['data'].cutoff - 1  # (transactions["payment_period"] - transactions["occurrence_period"]).max()
 
+    #transactions["occurence_date"] = transactions["occurrence_period"].apply(lambda x: date_from_period(x))
+    #transactions["payment_date"] = transactions["payment_period"].apply(lambda x: date_from_period(x))
+    #transactions["noti_date"] = (transactions["occurrence_period"] + transactions["noti_period"]).apply(lambda x: date_from_period(x))
+    #transactions["settle_date"] = (transactions["occurrence_period"] + transactions["settle_period"]).apply(lambda x: date_from_period(x))
+
     # Transactions summarised by claim/dev:
     transactions_group = (transactions
             .groupby(["claim_no", "development_period"], as_index=False)
@@ -126,7 +131,9 @@ def process_data_davide(config: ExperimentConfig, dat: pd.DataFrame) -> pd.DataF
         how="cross"
     ).assign(
         payment_period=lambda df: (df.occurrence_period + df.development_period),
-        is_settled=lambda df: (df.occurrence_period + df.development_period) >= df.settle_period
+        is_settled=lambda df: (df.occurrence_period + df.development_period) >= df.settle_period,
+        occurrence_date=lambda df: df.occurrence_period.apply(lambda x: date_from_period(x)),
+        payment_date=lambda df: (df.occurrence_period + df.development_period).apply(lambda x: date_from_period(x))
     )
 
     # create the dataset
@@ -200,6 +207,12 @@ def process_data(config: ExperimentConfig, dat: pd.DataFrame) -> pd.DataFrame:
 
     dat["development_period"] = np.minimum(dat["payment_period"] - dat["occurrence_period"], config['data'].maxdev)  
     
+
+    dat["occurrence_date"] = dat["occurrence_period"].apply(lambda x: date_from_period(x))
+    dat["payment_date"] = dat["payment_period"].apply(lambda x: date_from_period(x))
+    dat["noti_date"] = (dat["occurrence_period"] + dat["noti_period"]).apply(lambda x: date_from_period(x))
+    dat["settle_date"] = (dat["occurrence_period"] + dat["settle_period"]).apply(lambda x: date_from_period(x))
+
     # Clean close to zero values
     dat["payment_size"] = np.where(abs(dat.payment_size) < 1e-2, 0.0, dat.payment_size)
 
