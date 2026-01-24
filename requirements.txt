@@ -122,7 +122,7 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
 pytz==2025.2
 PyYAML==6.0.3
-ray @ https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-3.0.0.dev0-cp313-cp313-manylinux2014_x86_64.whl#sha256=33c49acf8e31970d0a88a428593bacb25d27e607dfb1fd7b3955ebfdcee17d6f
+#ray @ https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-3.0.0.dev0-cp313-cp313-manylinux2014_x86_64.whl#sha256=33c49acf8e31970d0a88a428593bacb25d27e607dfb1fd7b3955ebfdcee17d6f
 referencing==0.37.0
 requests==2.32.5
 rich==14.2.0
