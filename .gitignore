@@ -1,7 +1,6 @@
 .venv/
 01_data/
 99_scratch/
-runs/
 __pycache__/
 *.pyc
 *.pyo
