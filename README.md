@@ -10,7 +10,7 @@ It is a step in that direction, but by no means the finished article. The codeba
 
 There are two main scripts in this repository located in the root of the 02_code folder:
 -   `GRU_framework` - 3 files built upon the GRU code created by Sarah MacDonnell
--   `NN_vs_GBM` - 3 files built upon the GRU code created by Jacky Poon and Davide Coppola
+-   `NN_vs_GBM` - 3 files built upon the GRU code created by Jacky Poon and Davide Ruffini
 
 For both scripts, the structure is similar, there is:
  - a close to original version of the code (e.g. `GRU_framework_orig.ipynb`),
