@@ -5,49 +5,35 @@ import pprint
 import matplotlib
 from matplotlib import pyplot as plt
 
-
-import time
 from datetime import datetime
-import plotly.express as px  # Add this import
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import plotly.io as pio
 
 # PyTorch imports
 import torch
-import torch.nn as nn
-from torch.nn import functional as F
 from torch.utils.tensorboard import SummaryWriter
-from torch.autograd import Variable
 
 
 # Scikit-learn imports
-from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, MinMaxScaler, FunctionTransformer
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import  MinMaxScaler, FunctionTransformer
 from sklearn.pipeline import Pipeline
-
-from sklearn.metrics import mean_squared_error
-
-from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
-from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.ensemble import HistGradientBoostingRegressor
-
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, PredefinedSplit
+from sklearn.model_selection import RandomizedSearchCV
 
 
 import chainladder as cl
-import math
 import random
 import shap
 
 
 # Local imports
-from utils.config import ExperimentConfig, load_config_from_yaml
-from utils.neural_networks import TabularNetRegressor, FeedForwardNet, ColumnKeeper, Make3D
-from utils.data_engineering import load_data, process_data, create_train_test_datasets, process_data_davide
-from utils.tensorboard import generate_enhanced_tensorboard_outputs, create_actual_vs_expected_plot
+from utils.config import load_config_from_yaml
+from utils.neural_networks import TabularNetRegressor, FeedForwardNet, ColumnKeeper
+from utils.data_engineering import load_data, process_data_davide
 from utils.excel import save_df_to_excel
 from utils.charts import chart_epoch_loss, chart_dual_QQ
-from utils.shap import ShapExplainer, log_shap_explanations, create_background_dataset  
+from utils.shap import create_background_dataset  
+
 
 # Load from YAML file
 config = load_config_from_yaml('configs/NN_v_GBM_NJC_config.yaml')
@@ -118,12 +104,6 @@ basic_chain_ladder = cl.Pipeline(
     ('model', cl.Chainladder())])
 
 basic_chain_ladder.fit(triangle)
-
-basic_chain_ladder.named_steps.dev.cdf_
-basic_chain_ladder.named_steps.dev.ldf_
-basic_chain_ladder.named_steps.model.ultimate_
-
-
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
