@@ -22,7 +22,7 @@ import pandas as pd
 import numpy as np
 from typing import Tuple
 import datetime
-
+import torch
 from utils.config import ExperimentConfig
 
 
@@ -360,6 +360,30 @@ def create_train_test_datasets_davide(dat: pd.DataFrame, config: ExperimentConfi
     
     return trainx, y_train, testx, y_test
 
+
+def make_claim_sampler(indices_df):
+    """
+    Returns a claims_sampler function based on source dataset with indices
+
+    """
+    def claim_sampler(X, y, sample_weight=None, device=None):
+        indices = torch.tensor(
+            indices_df[["claim_no", "development_period"]]
+            .assign(dummy=1)
+            .reset_index()
+            .groupby(["claim_no", "development_period"])
+            .sample(n=1)
+            .index
+        )
+        if device is not None:
+            indices = indices.to(device)
+        if sample_weight is None:
+            return torch.index_select(X, 0, indices), torch.index_select(y, 0, indices)
+        else:
+            return torch.index_select(sample_weight, 0, indices), torch.index_select(X, 0, indices), torch.index_select(y, 0, indices)
+    return claim_sampler
+
+
 def create_train_test_datasets_seq_3D(
         dat: pd.DataFrame, 
         config: ExperimentConfig
@@ -378,28 +402,31 @@ def create_train_test_datasets_seq_3D(
     """
     features = config['data'].features
 
-    w_train = dat[['claim_no', 'development_period']].copy()
-    w       = dat[['claim_no', 'development_period']].copy()
+    w_train = dat.loc[dat.train_ind, ['claim_no', 'development_period']].copy()
+    w       = dat.loc[:            , ['claim_no', 'development_period']].copy()
 
     x_train = dat.loc[dat.train_ind, features + ["claim_no"]]
     x       = dat.loc[:            , features + ["claim_no"]]
 
-    y_train = dat[['claim_no', 'development_period']].copy()
-    y       = dat[['claim_no', 'development_period']].copy()
+    y_train = dat.loc[dat.train_ind, ['claim_no', 'development_period']].copy()
+    y       = dat.loc[:            , ['claim_no', 'development_period']].copy()
 
     # 1. Create a lookup Series mapped by (claim_no, development_period)
     # We drop duplicates just in case there are identical claim/period rows to avoid reindexing errors
     lookup_payments = dat.set_index(['claim_no', 'development_period'])['payment_size']
+    lookup_train_payments = dat.loc[dat.train_ind].set_index(['claim_no', 'development_period'])['payment_size']
     lookup_train_ind = dat.set_index(['claim_no', 'development_period'])['train_ind']
 
     # 2. Loop through 1 to maxdev to create the future columns
     for n in range(1, config["data"].maxdev):
         # Calculate the future development period we want to look up
-        target_periods = dat['development_period'] + n
-        
         # Create a MultiIndex consisting of the current claim_no and the FUTURE target period
+        target_periods = dat['development_period'] + n
         target_idx = pd.MultiIndex.from_arrays([dat['claim_no'], target_periods])
-        
+
+        train_periods = dat.loc[dat.train_ind, 'development_period'] + n
+        train_idx = pd.MultiIndex.from_arrays([dat.loc[dat.train_ind, 'claim_no'], train_periods])
+
         # Look up the future payments. 
         # .reindex() maps the values and returns NaN if that future period doesn't exist
         # .values ensures the result assigns correctly as a flat array to our DataFrame
@@ -407,15 +434,11 @@ def create_train_test_datasets_seq_3D(
         y[f'future_payment_{n}']       = lookup_payments.reindex(target_idx).values
         w[f'weight_{n}']               = 1.0
 
-        y_train[f'future_payment_{n}'] = np.where(
-            lookup_train_ind.reindex(target_idx) & 
-            (~pd.isna(lookup_train_ind.reindex(target_idx).values)),
-            lookup_payments.reindex(target_idx).values,
-            0.0
-        )
+        y_train[f'future_payment_{n}'] = lookup_train_payments.reindex(train_idx).values
+
         w_train[f'weight_{n}'] = np.where(
-            lookup_train_ind.reindex(target_idx) & 
-            (~pd.isna(lookup_train_ind.reindex(target_idx).values)),
+            lookup_train_ind.reindex(train_idx) & 
+            (~pd.isna(lookup_train_ind.reindex(train_idx).values)),
             1.0,
             0.0
         )

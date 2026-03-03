@@ -5,21 +5,24 @@ data:
   data_dir: https://raw.githubusercontent.com/agi-lab/SPLICE/main/datasets/complexity_1/
   filename: payment_1.csv
   cutoff: 40
-  cutoff1: 32
   maxdev: 40
   data_cols:
-  - occurrence_time
   - notidel
+  - occurrence_time
   - development_period
-  - pmt_no
-  - log1_paid_cumulative
-  - claim_no
+  - payment_period
+  - has_payment_to_prior_period 
+  - log1_payment_to_prior_period
+  - payment_count_to_prior_period
+  - claim_no  
   features:
-  - occurrence_time
   - notidel
+  - occurrence_time
   - development_period
-  - pmt_no
-  - log1_paid_cumulative
+  - payment_period
+  - has_payment_to_prior_period
+  - log1_payment_to_prior_period
+  - payment_count_to_prior_period
   output_field: claim_size
 
 model:
@@ -42,11 +45,11 @@ training:
   seed: 42
   enable_shap: true
   glm_iter: 500
-  mdn_iter: 1000
   nn_cv_iter: 100
   nn_iter: 2001
   print_loss_every_iter: 100
-  rebatch_every_iter: 1
+  use_batching_logic: true
+  rebatch_every_iter: 100
   shap_background_samples: 100
   shap_log_frequency: 500
   shap_max_samples: 50

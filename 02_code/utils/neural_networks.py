@@ -203,20 +203,7 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         return y
         
 
-    def setup_module(self, n_input, n_output):
-        # Target device for tensors
-        if self.device == "default":
-            # Use GPU if available
-            if torch.backends.mps.is_available():
-                device = "mps"  
-            elif torch.cuda.is_available():
-                device = "cuda" 
-            else:
-                device = "cpu",  
-        else:
-            device = self.device
-
-        self.target_device = torch.device(device)         
+    def setup_module(self, n_input, n_output):      
         # Training new model
         self.module_ = self.module(
             n_input=n_input, 
@@ -232,12 +219,35 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         ).to(self.target_device)
         
 
+    def setup_device(self):
+        # Target device for tensors
+        if self.device == "default":
+            # Use GPU if available
+            if torch.backends.mps.is_available():
+                device = "mps"  
+            elif torch.cuda.is_available():
+                device = "cuda" 
+            else:
+                device = "cpu",  
+        else:
+            device = self.device
+
+        self.target_device = torch.device(device)   
+
+
     def fit(self, X, y, sample_weight=None):
         # The main fit logic is in partial_fit
         # We will try a few times if numbers explode because NN's are finicky and we are doing CV
         n_input = X.shape[-1]
         n_output = 1 if y.ndim == 1 else y.shape[-1]
-        self.init_bias_calc = np.log(y.mean()).astype(np.float32)
+        
+        self.setup_device()
+
+        # Initial bias (1D or 2D array compatible)
+        self.init_bias_calc = torch.log(
+            torch.from_numpy(self.fix_array(y).mean(axis=0))           
+        ).to(self.target_device)
+
         self.setup_module(n_input=n_input, n_output=n_output)
 
         # Partial fit means you take an existing model and keep training 
@@ -295,12 +305,16 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         best_loss = float('inf') # set to infinity initially
         if sample_weight is not None:
             if self.batch_function is not None:
-                w_tensor_batch, X_tensor_batch, y_tensor_batch = self.batch_function(X_tensor, y_tensor)
+                w_tensor_batch, X_tensor_batch, y_tensor_batch = self.batch_function(
+                    X_tensor, y_tensor, sample_weight=weight_tensor, device=self.target_device
+                )
             else:
                 w_tensor_batch, X_tensor_batch, y_tensor_batch = weight_tensor, X_tensor, y_tensor
         else:
             if self.batch_function is not None:
-                X_tensor_batch, y_tensor_batch = self.batch_function(X_tensor, y_tensor)
+                X_tensor_batch, y_tensor_batch = self.batch_function(
+                    X_tensor, y_tensor, device=self.target_device
+                )
             else:
                 X_tensor_batch, y_tensor_batch = X_tensor, y_tensor
 
@@ -473,9 +487,19 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
             if (self.batch_function is not None) & (epoch % self.rebatch_every_iter == 0):
                 print(f"refreshing batch on epoch {epoch}")
                 if sample_weight is not None:
-                    w_tensor_batch, X_tensor_batch, y_tensor_batch = self.batch_function(X_tensor, y_tensor)
+                    if self.batch_function is not None:
+                        w_tensor_batch, X_tensor_batch, y_tensor_batch = self.batch_function(
+                            X_tensor, y_tensor, sample_weight=weight_tensor, device=self.target_device
+                        )
+                    else:
+                        w_tensor_batch, X_tensor_batch, y_tensor_batch = weight_tensor, X_tensor, y_tensor
                 else:
-                    X_tensor_batch, y_tensor_batch = self.batch_function(X_tensor, y_tensor)
+                    if self.batch_function is not None:
+                        X_tensor_batch, y_tensor_batch = self.batch_function(
+                            X_tensor, y_tensor, device=self.target_device
+                        )
+                    else:
+                        X_tensor_batch, y_tensor_batch = X_tensor, y_tensor
 
         if self.keep_best_model:
             self.module_.load_state_dict(self.best_model)
@@ -677,8 +701,12 @@ class BasicLogGRU(nn.Module):
         
         # Initialize bias if provided
         if init_bias is not None:
-            self.linear.bias.data.fill_(init_bias)
-    
+            try:
+                self.linear.bias.data.fill_(init_bias.item())
+            except RuntimeError:
+                # For 2D bias values
+                with torch.no_grad():
+                    self.linear.bias.copy_(init_bias)
     def forward(self, x):
         # GRU forward pass
         h, _ = self.gru(x)
@@ -1025,19 +1053,30 @@ class Make3D(BaseEstimator, TransformerMixin):
     def transform(self, X):
         # Group by 'claim_no'
         if self.full_history:  # If full_history is True, repeat the historical transactions
-            # 1. Reset index to ensure every row has a unique numeric identifier before we duplicate
+            # Reset index to ensure every row has a unique numeric identifier before we duplicate
             X = X.copy().reset_index(drop=True)
 
-            # 2. Duplicate the rows
-            # .repeat() duplicates the index N times, where N is the 'development_period'
-            d = X.loc[X.index.repeat(self.config["data"].maxdev - X['development_period'])].copy()
+            # Step 1: Find min_development_period per claim_no and attach it back
+            X['min_development_period'] = X.groupby('claim_no')['development_period'].transform('min')
 
-            # 3. Add a column to represent which historical period this duplicated row represents (1 to current development_period)
-            # Because we kept the original index in step 2, we can group by it to count the occurrences
-            d['data_as_at_development_period'] = self.config["data"].maxdev - d.groupby(level=0).cumcount() - 1
+            # Step 2: Calculate the number of times to duplicate each row
+            repeat_counts = X['development_period'] - X['min_development_period'] + 1
+
+            # Step 3: Duplicate the rows
+            # X.index.repeat duplicates the index, and .loc selects those duplicated rows
+            X_expanded = X.loc[X.index.repeat(repeat_counts)].copy()
+
+            # Step 4: Number the duplicated rows (data_as_at_development_period)
+            # We group by the original index (level=0) and use cumcount() which counts 0, 1, 2...
+            X_expanded['data_as_at_development_period'] = (
+                X_expanded['min_development_period'] + X_expanded.groupby(level=0).cumcount()
+            )
+
+            # Step 5: Reset the index to clean up the duplicated index values
+            X_expanded = X_expanded.reset_index(drop=True).sort_values(['claim_no', 'data_as_at_development_period', 'development_period'])
 
             # One record per claim_no and "data up to development period"
-            grouped = d.reset_index(drop=True).groupby(['claim_no', 'data_as_at_development_period'])
+            grouped = X_expanded.reset_index(drop=True).groupby(['claim_no', 'data_as_at_development_period'])
         else:
             # One record for claim_no for the original GRU logic by Sarah
             grouped = X.groupby('claim_no')
