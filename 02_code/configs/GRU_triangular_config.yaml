@@ -1,6 +1,6 @@
 experiment_name: gru_experiment_20260228_000000
 run_timestamp: '20260228_000000'
-
+save_excel: False
 data:
   data_dir: https://raw.githubusercontent.com/agi-lab/SPLICE/main/datasets/complexity_1/
   filename: payment_1.csv
@@ -28,7 +28,7 @@ data:
 model:
   batch_norm: false
   clip_value: null
-  device: cpu
+  device: default
   dropout: 0.0
   keep_best_model: false
   l1_applies_params:
@@ -46,8 +46,8 @@ training:
   enable_shap: true
   glm_iter: 500
   nn_cv_iter: 100
-  nn_iter: 2001
-  print_loss_every_iter: 100
+  nn_iter: 501
+  print_loss_every_iter: 10
   use_batching_logic: true
   rebatch_every_iter: 100
   shap_background_samples: 100
