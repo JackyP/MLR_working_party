@@ -244,9 +244,18 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
         self.setup_device()
 
         # Initial bias (1D or 2D array compatible)
-        self.init_bias_calc = torch.log(
-            torch.from_numpy(self.fix_array(y).mean(axis=0))           
-        ).to(self.target_device)
+        if sample_weight is None:
+            self.init_bias_calc = torch.log(
+                torch.from_numpy(self.fix_array(y).mean(axis=0))           
+            ).to(self.target_device)
+        else:
+            # Divide by sample weight
+            self.init_bias_calc = torch.log(
+                torch.from_numpy(
+                    self.fix_array(y).sum(axis=0) / 
+                    self.fix_array(sample_weight).sum(axis=0)
+            )).to(self.target_device)
+
 
         self.setup_module(n_input=n_input, n_output=n_output)
 
@@ -385,7 +394,15 @@ class TabularNetRegressor(BaseEstimator, RegressorMixin):
                 #Calculate the training loss on the entire dataset
                 with torch.no_grad():
                     y_pred_full = self.module_(X_tensor)
-                    full_train_loss = loss_fn(y_pred_full, y_tensor).item()
+                    full_train_loss = loss_fn(y_pred_full, y_tensor)
+
+                    # Apply weights
+                    if sample_weight is not None:
+                        w_normalized = weight_tensor / weight_tensor.sum()
+                        full_train_loss = (w_normalized * full_train_loss).sum()
+
+                    full_train_loss = full_train_loss.item()
+
                     self.training_losses_history.append(full_train_loss)
                     
                     # Calculate the RMSE over the entire dataset
