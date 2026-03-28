@@ -386,7 +386,8 @@ def make_claim_sampler(indices_df):
 
 def create_train_test_datasets_seq_3D(
         dat: pd.DataFrame, 
-        config: ExperimentConfig
+        config: ExperimentConfig,
+        epsilon: float=0.0
     ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
     """
     Create training and test datasets from processed data.
@@ -394,6 +395,7 @@ def create_train_test_datasets_seq_3D(
     Args:
         dat: Processed DataFrame
         config: Experiment configuration
+        epsilon: Add a small value to y_train to avoid numerical issues
         
     Returns:
         Tuple of (w_train, x_train, y_train, w, x, y)
@@ -434,7 +436,7 @@ def create_train_test_datasets_seq_3D(
         y[f'future_payment_{n}']       = lookup_payments.reindex(target_idx).values
         w[f'weight_{n}']               = 1.0
 
-        y_train[f'future_payment_{n}'] = lookup_train_payments.reindex(train_idx).values
+        y_train[f'future_payment_{n}'] = lookup_train_payments.reindex(train_idx).values + epsilon
 
         w_train[f'weight_{n}'] = np.where(
             lookup_train_ind.reindex(train_idx) & 

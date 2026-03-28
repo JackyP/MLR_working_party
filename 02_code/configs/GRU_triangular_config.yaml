@@ -29,13 +29,13 @@ model:
   batch_norm: false
   clip_value: null
   device: default
-  dropout: 0.0
+  dropout: 0.3
   keep_best_model: false
   l1_applies_params:
   - linear.weight
   - hidden.weight
   l1_penalty: 0.0
-  max_lr: 0.01
+  max_lr: 0.1
   n_hidden: 64
   weight_decay: 0.0
 
@@ -43,10 +43,10 @@ training:
   # cv_runs: 24
   seed: 42
   enable_shap: false
-  nn_iter: 501
+  nn_iter: 101
   print_loss_every_iter: 10
-  use_batching_logic: true
-  rebatch_every_iter: 20
+  use_batching_logic: false
+  rebatch_every_iter: 100
   shap_background_samples: 100
   shap_log_frequency: 500
   shap_max_samples: 50
