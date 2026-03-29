@@ -724,6 +724,7 @@ class BasicLogGRU(nn.Module):
                 # For 2D bias values
                 with torch.no_grad():
                     self.linear.bias.copy_(init_bias)
+
     def forward(self, x):
         # GRU forward pass
         h, _ = self.gru(x)
@@ -780,7 +781,12 @@ class BasicLogLSTM(nn.Module):
         
         # Initialize bias if provided
         if init_bias is not None:
-            self.linear.bias.data.fill_(init_bias)
+            try:
+                self.linear.bias.data.fill_(init_bias.item())
+            except RuntimeError:
+                # For 2D bias values
+                with torch.no_grad():
+                    self.linear.bias.copy_(init_bias)
     
     def forward(self, x):
         # LSTM forward pass
@@ -838,7 +844,12 @@ class BasicLogRNN(nn.Module):
         
         # Initialize bias if provided
         if init_bias is not None:
-            self.linear.bias.data.fill_(init_bias)
+            try:
+                self.linear.bias.data.fill_(init_bias.item())
+            except RuntimeError:
+                # For 2D bias values
+                with torch.no_grad():
+                    self.linear.bias.copy_(init_bias)
     
     def forward(self, x):
         # RNN forward pass
