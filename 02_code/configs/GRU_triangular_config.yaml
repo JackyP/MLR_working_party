@@ -23,7 +23,7 @@ data:
   - has_payment_to_prior_period
   - log1_payment_to_prior_period
   - payment_count_to_prior_period
-  output_field: claim_size
+  output_field: payment_size
 
 model:
   batch_norm: false
