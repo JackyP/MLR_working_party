@@ -1103,6 +1103,9 @@ class Make3D(BaseEstimator, TransformerMixin):
             # Step 5: Reset the index to clean up the duplicated index values
             X_expanded = X_expanded.reset_index(drop=True).sort_values(['claim_no', 'data_as_at_development_period', 'development_period'])
 
+            # Step 6: Scale development period between 0 to 1:
+            X_expanded['development_period'] = X_expanded['development_period'] / self.config["data"].maxdev
+
             # One record per claim_no and "data up to development period"
             grouped = X_expanded.reset_index(drop=True).groupby(['claim_no', 'data_as_at_development_period'])
         else:
