@@ -29,7 +29,7 @@ model:
   batch_norm: false
   clip_value: null
   device: default
-  dropout: 0.3
+  dropout: 0.0
   keep_best_model: false
   l1_applies_params:
   - linear.weight
@@ -43,7 +43,7 @@ training:
   # cv_runs: 24
   seed: 42
   enable_shap: false
-  nn_iter: 100
+  nn_iter: 200
   print_loss_every_iter: 10
   use_batching_logic: true
   rebatch_every_iter: 10
